@@ -3,10 +3,8 @@
 
 #define USE_PARALLEL_FFT3D 1
 #define VOXEL_RESOLUTION  128
-// #define P 4.0
-#define P 100000000.0
-// #define VOXEL_FILL_INSIDE 1
-#define VOXEL_FILL_INSIDE 0
+#define P 4.0
+#define VOXEL_FILL_INSIDE 1
 #define VOXEL_ROBUST_FILL 0
 #define FP_POW    16
 #define FP_SCALE  (1<<FP_POW)
@@ -20,5 +18,9 @@
 #define INSIDE_Z 64
 #define INF 1000000000
 
+// Global height penalty (default = P, settable at runtime via set_height_penalty())
+#ifdef __cplusplus
+extern double g_height_penalty;
+#endif
 
 #endif
