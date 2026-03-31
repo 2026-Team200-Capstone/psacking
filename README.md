@@ -79,6 +79,43 @@ sudo apt install libfftw3-dev
 sudo apt install cmake build-essential
 ```
 
+### Docker (recommended for shared servers)
+
+For shared GPU servers, use Docker instead of installing CUDA, FFTW, CMake,
+and Python dependencies directly into the host environment.
+
+Prerequisites on the host:
+
+- NVIDIA driver installed
+- Docker Engine + Docker Compose plugin
+- NVIDIA Container Toolkit configured for Docker
+
+Build the development image:
+
+```bash
+docker compose build
+```
+
+Open a shell inside the container:
+
+```bash
+docker compose run --rm dev
+```
+
+Run tests inside the container:
+
+```bash
+docker compose run --rm dev pytest tests/test_bindings.py
+docker compose run --rm dev pytest tests/ -v
+```
+
+Notes:
+
+- The repository is bind-mounted to `/workspace`
+- A project-local virtual environment is created at `.venv/`
+- `pip install -e ".[dev]"` runs automatically when the container starts
+- GPU access uses `gpus: all`, so this setup is intended for Docker hosts with NVIDIA GPUs
+
 ## Quick Start
 
 ### Basic Packing
