@@ -399,7 +399,6 @@ class BinPacker:
             fft_search_placement_with_cache,
             fft_search_batch_interlocking_free,
             place_in_tray,
-            calculate_distance,
             set_height_penalty,
         )
 
@@ -462,7 +461,7 @@ class BinPacker:
 
             # Pre-compute distance field ONCE per item (not per orientation)
             if self.num_orientations > 1 or self.interlocking_free:
-                tray_distance = calculate_distance(tray)
+                tray_distance = self._compute_distance_field(tray)
 
             if self.interlocking_free:
                 # Use batch interlocking-free search (Section 4.3)
@@ -582,6 +581,16 @@ class BinPacker:
         if found:
             return tuple(position), True, score
         return None, False, 0.0
+
+    def _compute_distance_field(self, tray: np.ndarray) -> np.ndarray:
+        """Compute Euclidean distance field using scipy.
+
+        scipy.ndimage.distance_transform_edt gives exact L2 distances,
+        whereas the C++ sweep approximates L1/Chebyshev distance.
+        """
+        from scipy.ndimage import distance_transform_edt
+        field = distance_transform_edt(tray == 0)
+        return np.round(field).astype(np.int32)
 
     def _calculate_stats(
         self, tray: np.ndarray
