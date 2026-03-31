@@ -52,6 +52,7 @@ class PlacementInfo:
     success: bool
     volume: int = 0
     orientation_index: int = 0
+    refined_position: Optional[Tuple[float, float, float]] = None
 
 
 @dataclass
@@ -81,6 +82,7 @@ class MeshPlacementInfo:
     voxel_position: Optional[Tuple[int, int, int]]
     orientation_index: int
     success: bool
+    refined_position: Optional[Tuple[float, float, float]] = None
 
 
 @dataclass
@@ -233,6 +235,7 @@ class BinPacker:
         height_penalty: float = 4.0,
         num_orientations: int = 1,
         interlocking_free: bool = False,
+        continuous_refinement: bool = False,
     ):
         if len(tray_size) != 3:
             raise ValueError(f"tray_size must be a 3-tuple, got {len(tray_size)} elements")
@@ -248,6 +251,7 @@ class BinPacker:
         self.height_penalty = height_penalty
         self.num_orientations = num_orientations
         self.interlocking_free = interlocking_free
+        self.continuous_refinement = continuous_refinement
         self._voxelizer = Voxelizer(resolution=voxel_resolution)
 
     def pack_files(
@@ -358,6 +362,7 @@ class BinPacker:
                 voxel_position=placement.position,
                 orientation_index=placement.orientation_index,
                 success=placement.success,
+                refined_position=placement.refined_position,
             ))
 
         result.mesh_placements = mesh_placements
@@ -508,6 +513,16 @@ class BinPacker:
                         found_any = True
 
             if found_any:
+                # Continuous refinement: sub-voxel position optimization (Section 4.2)
+                refined_pos = None
+                if self.continuous_refinement:
+                    # Need distance field (compute if not already available)
+                    if not (self.num_orientations > 1 or self.interlocking_free):
+                        tray_distance = self._compute_distance_field(tray)
+                    refined_pos = self._refine_placement(
+                        best_rotated_item, tray_distance, best_position
+                    )
+
                 item_id = id_offset + num_placed + 1
                 tray = place_in_tray(best_rotated_item, tray, best_position, item_id)
                 generation += 1
@@ -519,6 +534,7 @@ class BinPacker:
                     success=True,
                     volume=volume,
                     orientation_index=best_orientation_idx,
+                    refined_position=refined_pos,
                 ))
             else:
                 placements.append(PlacementInfo(
@@ -582,6 +598,47 @@ class BinPacker:
             return tuple(position), True, score
         return None, False, 0.0
 
+    def _refine_placement(
+        self,
+        item: np.ndarray,
+        tray_distance: np.ndarray,
+        discrete_position: tuple,
+    ) -> Optional[Tuple[float, float, float]]:
+        """Continuous refinement of a discrete voxel placement (Section 4.2).
+
+        Starting from the discrete integer position q*, minimizes the proximity
+        energy E(t) = Σ_{v ∈ item} φ(q* + v + t) over a continuous offset t
+        within [-0.5, 0.5]^3 using trilinear interpolation of the distance field.
+
+        Returns the refined (float) position.
+        """
+        from scipy.optimize import minimize
+        from scipy.ndimage import map_coordinates
+
+        item_voxels = np.argwhere(item > 0).astype(float)  # (N, 3)
+        if len(item_voxels) == 0:
+            return None
+
+        q = np.array(discrete_position, dtype=float)
+        shape = np.array(tray_distance.shape, dtype=float)
+        phi = tray_distance.astype(float)
+
+        def energy(t):
+            coords = q + item_voxels + t  # (N, 3)
+            # Clamp to valid range for interpolation
+            coords = np.clip(coords, 0, shape - 1)
+            sampled = map_coordinates(phi, coords.T, order=1, mode='nearest')
+            return float(np.sum(sampled))
+
+        result = minimize(
+            energy,
+            x0=[0.0, 0.0, 0.0],
+            method='L-BFGS-B',
+            bounds=[(-0.5, 0.5)] * 3,
+        )
+        refined = tuple((q + result.x).tolist())
+        return refined
+
     def _compute_distance_field(self, tray: np.ndarray) -> np.ndarray:
         """Compute Euclidean distance field using scipy.
 
@@ -618,5 +675,6 @@ class BinPacker:
             f"BinPacker(tray_size={self.tray_size}, "
             f"voxel_resolution={self.voxel_resolution}, "
             f"num_orientations={self.num_orientations}, "
-            f"height_penalty={self.height_penalty})"
+            f"height_penalty={self.height_penalty}, "
+            f"continuous_refinement={self.continuous_refinement})"
         )
