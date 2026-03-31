@@ -230,7 +230,7 @@ class BinPacker:
         self,
         tray_size: Tuple[int, int, int],
         voxel_resolution: int = 128,
-        height_penalty: float = 1e8,
+        height_penalty: float = 4.0,
         num_orientations: int = 1,
         interlocking_free: bool = False,
     ):
@@ -400,7 +400,11 @@ class BinPacker:
             fft_search_batch_interlocking_free,
             place_in_tray,
             calculate_distance,
+            set_height_penalty,
         )
+
+        # Propagate height_penalty to C++ layer
+        set_height_penalty(self.height_penalty)
 
         if len(items) == 0:
             raise ValueError("items list cannot be empty")
@@ -604,5 +608,6 @@ class BinPacker:
         return (
             f"BinPacker(tray_size={self.tray_size}, "
             f"voxel_resolution={self.voxel_resolution}, "
-            f"num_orientations={self.num_orientations})"
+            f"num_orientations={self.num_orientations}, "
+            f"height_penalty={self.height_penalty})"
         )

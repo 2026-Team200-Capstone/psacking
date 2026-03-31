@@ -22,6 +22,9 @@ using namespace std;
 
 #include "path.h"
 
+// g_height_penalty is defined in fft3.cu and declared in constants.h
+// (extern double g_height_penalty)
+
 // --------------------------------------------------------------
 
 void fft3d(fftw_complex *in, fftw_complex *out, Index3 size, bool inverse=false);
@@ -628,7 +631,7 @@ Index3 fft_search_placement (const VoxelGrid &A, const VoxelGrid &tray, bool &fo
     for (auto id : non_colliding_loc) {
       auto [i, j, k] = id;
       double qz = (k + 0.0) / (L + 0.0);
-      double metric_with_penalty = proximity_metric(i, j, k) + P * pow(qz, 3.0);
+      double metric_with_penalty = proximity_metric(i, j, k) + g_height_penalty * pow(qz, 3.0);
       if (metric_with_penalty < bestVal) {
         found = true;
         bestId = id;
@@ -690,7 +693,7 @@ Index3 fft_search_placement_with_cache(const VoxelGrid &A, const VoxelGrid &tray
     for (auto id : non_colliding_loc) {
       auto [i, j, k] = id;
       double qz = (k + 0.0) / (L + 0.0);
-      double metric_with_penalty = proximity_metric(i, j, k) + P * pow(qz, 3.0);
+      double metric_with_penalty = proximity_metric(i, j, k) + g_height_penalty * pow(qz, 3.0);
       if (metric_with_penalty < bestVal) {
         found = true;
         bestId = id;
@@ -751,7 +754,7 @@ Index3 fft_search_placement_with_cache_flat(
     for (auto id : non_colliding_loc) {
       auto [i, j, k] = id;
       double qz = (k + 0.0) / (L + 0.0);
-      double metric_with_penalty = proximity_metric(i, j, k) + P * pow(qz, 3.0);
+      double metric_with_penalty = proximity_metric(i, j, k) + g_height_penalty * pow(qz, 3.0);
       if (metric_with_penalty < bestVal) {
         found = true;
         bestId = id;

@@ -1322,7 +1322,7 @@ public:
       SCOPED_TIMER("compute_scores_gpu");
       compute_scores_kernel<<<numBlocks, blockSize>>>(
         d_collision_result, d_proximity_result, d_scores,
-        nx, ny, nz, max_x, max_y, max_z, P
+        nx, ny, nz, max_x, max_y, max_z, g_height_penalty
       );
       CUDA_RT_CALL(cudaDeviceSynchronize());
     }
@@ -1410,7 +1410,7 @@ public:
       SCOPED_TIMER("compute_scores_interlocking_gpu");
       compute_scores_with_interlocking_kernel<<<numBlocks, blockSize>>>(
         d_collision_result, d_proximity_result, d_interlocking_mask,
-        d_scores, nx, ny, nz, max_x, max_y, max_z, P
+        d_scores, nx, ny, nz, max_x, max_y, max_z, g_height_penalty
       );
       CUDA_RT_CALL(cudaDeviceSynchronize());
     }
@@ -1458,6 +1458,13 @@ public:
     }
   }
 };
+
+// Global height penalty (settable from Python via set_height_penalty())
+double g_height_penalty = P;
+
+void set_height_penalty(double hp) {
+  g_height_penalty = hp;
+}
 
 // Global context pointer (managed by Python)
 static GPUTrayContext* g_gpu_context = nullptr;

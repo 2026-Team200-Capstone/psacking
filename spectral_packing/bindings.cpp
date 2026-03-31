@@ -46,6 +46,9 @@ void fft_search_batch_interlocking_free(const std::vector<FlatVoxelGrid>& orient
                                          Index3& best_position, bool& found, double& best_score,
                                          int& best_orientation_idx);
 
+// Height penalty setter (from fft3.cu)
+void set_height_penalty(double hp);
+
 // GPU flood fill for interlocking detection - Algorithm 3 (from fft3.cu)
 void gpu_interlocking_free_positions(const int* h_collision_metric, int* h_result,
                                      int nx, int ny, int nz,
@@ -676,6 +679,22 @@ PYBIND11_MODULE(_core, m) {
             get_bounds: Get bounding box of occupied voxels
             save_vox: Save grid to MagicaVoxel format
     )pbdoc";
+
+    // Height penalty control
+    m.def("set_height_penalty", &set_height_penalty,
+          py::arg("height_penalty"),
+          R"pbdoc(
+              Set the global height penalty used in placement scoring.
+
+              The placement score is: proximity_score + height_penalty * (z/nz)^3
+              Lower values balance height vs proximity; higher values always prefer
+              lower z positions regardless of proximity.
+
+              Parameters
+              ----------
+              height_penalty : float
+                  Penalty weight for height. Default is 4.0 (paper value).
+          )pbdoc");
 
     // Core packing functions
     m.def("fft_search_placement", &py_fft_search_placement,
