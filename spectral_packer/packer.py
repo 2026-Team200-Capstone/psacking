@@ -236,6 +236,7 @@ class BinPacker:
         num_orientations: int = 1,
         interlocking_free: bool = False,
         continuous_refinement: bool = False,
+        pitch: Optional[float] = None,
     ):
         if len(tray_size) != 3:
             raise ValueError(f"tray_size must be a 3-tuple, got {len(tray_size)} elements")
@@ -245,6 +246,8 @@ class BinPacker:
             raise ValueError(f"voxel_resolution must be positive, got {voxel_resolution}")
         if num_orientations not in (1, 4, 6, 24):
             raise ValueError(f"num_orientations must be 1, 4, 6, or 24, got {num_orientations}")
+        if pitch is not None and pitch <= 0:
+            raise ValueError(f"pitch must be positive, got {pitch}")
 
         self.tray_size = tuple(tray_size)
         self.voxel_resolution = voxel_resolution
@@ -252,7 +255,8 @@ class BinPacker:
         self.num_orientations = num_orientations
         self.interlocking_free = interlocking_free
         self.continuous_refinement = continuous_refinement
-        self._voxelizer = Voxelizer(resolution=voxel_resolution)
+        self.pitch = pitch
+        self._voxelizer = Voxelizer(resolution=voxel_resolution, pitch=pitch)
 
     def pack_files(
         self,

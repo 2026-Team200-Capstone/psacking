@@ -80,10 +80,13 @@ class Voxelizer:
     >>> grid = vox.voxelize_mesh(vertices, faces)
     """
 
-    def __init__(self, resolution: int = 128):
+    def __init__(self, resolution: int = 128, pitch: Optional[float] = None):
         if resolution <= 0:
             raise ValueError(f"resolution must be positive, got {resolution}")
+        if pitch is not None and pitch <= 0:
+            raise ValueError(f"pitch must be positive, got {pitch}")
         self.resolution = resolution
+        self.pitch = pitch
 
     def voxelize_file(
         self,
@@ -111,8 +114,8 @@ class Voxelizer:
         path = Path(path)
         suffix = path.suffix.lower()
 
-        # For STL files, try to use the C++ voxelizer (faster)
-        if suffix == ".stl":
+        # For STL files, try to use the C++ voxelizer (faster, but no pitch support)
+        if suffix == ".stl" and self.pitch is None:
             try:
                 from . import voxelize_stl
                 return voxelize_stl(str(path), self.resolution)
@@ -174,10 +177,24 @@ class Voxelizer:
         mesh_bounds_min = bounds[0].copy()
         mesh_bounds_max = bounds[1].copy()
 
-        # Calculate voxel pitch based on resolution
+        # Calculate voxel pitch
         extents = mesh.extents
         max_extent = extents.max()
-        pitch = max_extent / (self.resolution - 1)
+        if self.pitch is not None:
+            max_voxels = max_extent / self.pitch
+            if max_voxels > self.resolution:
+                import warnings
+                pitch = max_extent / (self.resolution - 1)
+                warnings.warn(
+                    f"Object would exceed resolution {self.resolution} with "
+                    f"pitch={self.pitch} ({max_voxels:.0f} voxels needed). "
+                    f"Falling back to pitch={pitch:.4f}.",
+                    UserWarning,
+                )
+            else:
+                pitch = self.pitch
+        else:
+            pitch = max_extent / (self.resolution - 1)
 
         # Voxelize
         try:
@@ -234,10 +251,24 @@ class Voxelizer:
         # Create trimesh object
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
 
-        # Calculate voxel pitch based on resolution
+        # Calculate voxel pitch
         extents = mesh.extents
         max_extent = extents.max()
-        pitch = max_extent / (self.resolution - 1)
+        if self.pitch is not None:
+            max_voxels = max_extent / self.pitch
+            if max_voxels > self.resolution:
+                import warnings
+                pitch = max_extent / (self.resolution - 1)
+                warnings.warn(
+                    f"Object would exceed resolution {self.resolution} with "
+                    f"pitch={self.pitch} ({max_voxels:.0f} voxels needed). "
+                    f"Falling back to pitch={pitch:.4f}.",
+                    UserWarning,
+                )
+            else:
+                pitch = self.pitch
+        else:
+            pitch = max_extent / (self.resolution - 1)
 
         # Voxelize
         try:
@@ -366,4 +397,6 @@ class Voxelizer:
                     grid[idx[0], idx[1], idx[2]] = 1
 
     def __repr__(self) -> str:
+        if self.pitch is not None:
+            return f"Voxelizer(resolution={self.resolution}, pitch={self.pitch})"
         return f"Voxelizer(resolution={self.resolution})"
