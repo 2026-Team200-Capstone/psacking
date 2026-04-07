@@ -126,7 +126,7 @@ def export_blender(result):
         (0.9, 0.6, 0.4, 1),
     ]
 
-    item_ids = [p.item_index + 1 for p in result.placements if p.success]
+    item_ids = [v for v in np.unique(tray) if v > 1]
     for item_id in item_ids:
         voxels_idx = np.argwhere(tray == item_id)
         if len(voxels_idx) == 0:
