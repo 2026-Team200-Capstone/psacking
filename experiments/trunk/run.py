@@ -37,7 +37,7 @@ SPACE_RESOLUTION  = 128
 NUM_ORIENTATIONS  = 6
 HEIGHT_PENALTY    = 4.0
 INTERLOCKING_FREE = False
-SKIP_FILES        = {"12281_Container_v2_L2.obj"}
+SKIP_FILES        = {"12281_Container_v2_L2.obj", "Box.stl"}
 # ─────────────────────────────────────────────────────────────────────────────
 
 SUPPORTED_EXTS = {".stl", ".obj", ".ply", ".gltf", ".glb", ".dae", ".3mf"}
