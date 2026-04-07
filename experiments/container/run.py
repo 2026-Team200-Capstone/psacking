@@ -42,40 +42,32 @@ SKIP_FILES        = {"trunk_kona.ply"}
 
 SUPPORTED_EXTS = {".stl", ".obj", ".ply", ".gltf", ".glb", ".dae", ".3mf"}
 
-# 타이밍 로그: {"step", "duration_sec", "success", "notes"}
-_log: list[dict] = []
 
-
-class Timer:
-    """with 블록 안의 실행 시간을 측정합니다."""
-    def __enter__(self):
-        self._start = time.perf_counter()
-        return self
-
-    def __exit__(self, *_):
-        self.elapsed = time.perf_counter() - self._start
-
-    def __str__(self):
-        return f"{self.elapsed:.2f}s"
-
-
-def log(step: str, duration: float, success: bool = True, notes: str = ""):
-    _log.append({"step": step, "duration_sec": f"{duration:.3f}",
-                  "success": success, "notes": notes})
-    status = "OK" if success else "FAIL"
-    print(f"  [{status}] {step}: {duration:.2f}s  {notes}")
-
-
-def save_csv():
+def save_csv(voxelizer, packer, total_elapsed):
+    from spectral_packer.voxelizer import LogEntry
+    entries = voxelizer.log + packer.log + [
+        LogEntry(
+            step="total",
+            duration_sec=total_elapsed,
+            success=True,
+            notes=f"placed={packer.log[-1].notes if packer.log else '?'}",
+        )
+    ]
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["step", "duration_sec", "success", "notes"])
         writer.writeheader()
-        writer.writerows(_log)
+        for e in entries:
+            writer.writerow({
+                "step": e.step,
+                "duration_sec": f"{e.duration_sec:.3f}",
+                "success": e.success,
+                "notes": e.notes,
+            })
     print(f"\n[로그 저장] → {OUTPUT_CSV}")
 
 
-def collect_item_files() -> list[Path]:
+def collect_item_files() -> list:
     exclude = SKIP_FILES | {SPACE_FILE}
     return [
         f for f in sorted(INPUT_DIR.iterdir())
@@ -83,82 +75,24 @@ def collect_item_files() -> list[Path]:
     ]
 
 
-def voxelize_space(space_path: Path):
-    import trimesh
-    from spectral_packer import load_mesh
-
-    print(f"\n[공간 복셀화] {space_path.name}")
-    with Timer() as t:
-        vertices, faces = load_mesh(space_path, validate=True, repair=True)
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-
-        max_extent = float(mesh.extents.max())
-        pitch = max_extent / (SPACE_RESOLUTION - 1)
-
-        print(f"  바운딩박스 크기: {mesh.extents.tolist()}")
-        print(f"  pitch          : {pitch:.4f}  (해상도 {SPACE_RESOLUTION})")
-
-        filled = mesh.voxelized(pitch=pitch).fill().matrix.astype("int32")
-        initial_tray = (1 - filled).astype("int32")
-        tray_size = filled.shape
-
-        print(f"  트레이 크기    : {tray_size}")
-        print(f"  내부 free 비율 : {filled.mean():.1%}")
-
-    log("space_voxelization", t.elapsed, notes=f"tray={tray_size}")
-    return initial_tray, pitch, tray_size
-
-
-def voxelize_items(item_paths: list[Path], pitch: float):
-    import trimesh
-    from spectral_packer import load_mesh
-    from spectral_packer.voxelizer import VoxelizationInfo
-
-    voxels, voxel_infos = [], []
-
-    print(f"\n[아이템 복셀화] pitch={pitch:.4f}")
-    for path in item_paths:
-        with Timer() as t:
-            try:
-                vertices, faces = load_mesh(path, validate=True, repair=True)
-                mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-                bounds = mesh.bounds
-                vox = mesh.voxelized(pitch=pitch)
-                try:
-                    grid = vox.fill().matrix.astype("int32")
-                except Exception:
-                    # fill() 실패 시 표면 복셀만 사용
-                    grid = vox.matrix.astype("int32")
-                    print(f"  [경고] {path.name} fill() 실패 → 표면 복셀 사용")
-                success = True
-                notes = f"shape={grid.shape} voxels={int(grid.sum())}"
-            except Exception as e:
-                success = False
-                notes = str(e)
-                print(f"  [경고] {path.name} 복셀화 실패: {e} → 건너뜀")
-
-        log(f"item_voxelization:{path.name}", t.elapsed, success, notes)
-
-        if success:
-            voxels.append(grid)
-            voxel_infos.append(VoxelizationInfo(
-                mesh_path=path,
-                mesh_bounds_min=bounds[0].copy(),
-                mesh_bounds_max=bounds[1].copy(),
-                pitch=pitch,
-                voxel_shape=grid.shape,
-            ))
-            print(f"  {path.name:40s} → {grid.shape}  ({int(grid.sum())} voxels)")
-
-    return voxels, voxel_infos
-
-
-def run_packing(item_paths: list[Path], space_path: Path):
+def run_packing(item_paths: list, space_path: Path):
     from spectral_packer import BinPacker
     from spectral_packer.packer import MeshPlacementInfo
+    from spectral_packer.voxelizer import Voxelizer
 
-    initial_tray, pitch, tray_size = voxelize_space(space_path)
-    voxels, voxel_infos = voxelize_items(item_paths, pitch)
+    voxelizer = Voxelizer(resolution=SPACE_RESOLUTION, verbose=True)
+
+    print(f"\n[공간 복셀화] {space_path.name}")
+    initial_tray, pitch, tray_size = voxelizer.voxelize_space(space_path)
+
+    print(f"\n[아이템 복셀화] pitch={pitch:.4f}")
+    voxels, voxel_infos = [], []
+    for path in item_paths:
+        grid, info = voxelizer.voxelize_item(path, pitch)
+        if grid is not None:
+            voxels.append(grid)
+            voxel_infos.append(info)
+
     if not voxels:
         raise ValueError("복셀화된 아이템이 없습니다.")
 
@@ -170,13 +104,10 @@ def run_packing(item_paths: list[Path], space_path: Path):
         height_penalty=HEIGHT_PENALTY,
         interlocking_free=INTERLOCKING_FREE,
         pitch=pitch,
+        verbose=True,
     )
 
-    with Timer() as t:
-        result = packer.pack_voxels(voxels, initial_tray=initial_tray)
-
-    log("packing", t.elapsed,
-        notes=f"placed={result.num_placed}/{len(voxels)} density={result.density:.1%}")
+    result = packer.pack_voxels(voxels, initial_tray=initial_tray)
 
     result.mesh_placements = [
         MeshPlacementInfo(
@@ -190,7 +121,7 @@ def run_packing(item_paths: list[Path], space_path: Path):
         for p in result.placements
     ]
 
-    return result
+    return result, voxelizer, packer
 
 
 def print_result(result):
@@ -217,10 +148,9 @@ def export_blender(result):
 
     OUTPUT_BLEND.parent.mkdir(parents=True, exist_ok=True)
     print(f"\n[Blender 내보내기] → {OUTPUT_BLEND}")
-    with Timer() as t:
-        export_to_blend(result=result, output_path=OUTPUT_BLEND, include_tray_boundary=True)
-    log("blender_export", t.elapsed, notes=str(OUTPUT_BLEND))
-    print("  저장 완료!")
+    t0 = time.perf_counter()
+    export_to_blend(result=result, output_path=OUTPUT_BLEND, include_tray_boundary=True)
+    print(f"  저장 완료! ({time.perf_counter() - t0:.2f}s)")
 
     render_scene(result)
 
@@ -316,14 +246,13 @@ def render_scene(result):
 
     print(f"\n[렌더링] → {OUTPUT_RENDERS}")
     for view_name, cam_loc in views:
-        with Timer() as t:
-            camera.location = cam_loc
-            point_camera_at(camera, center)
-            output_path = OUTPUT_RENDERS / f"{view_name}.png"
-            scene.render.filepath = str(output_path)
-            bpy.ops.render.render(write_still=True)
-        log(f"render:{view_name}", t.elapsed, notes=str(output_path))
-        print(f"  저장: {output_path}")
+        t0 = time.perf_counter()
+        camera.location = cam_loc
+        point_camera_at(camera, center)
+        output_path = OUTPUT_RENDERS / f"{view_name}.png"
+        scene.render.filepath = str(output_path)
+        bpy.ops.render.render(write_still=True)
+        print(f"  저장: {output_path}  ({time.perf_counter() - t0:.2f}s)")
 
 
 def main():
@@ -343,18 +272,15 @@ def main():
     for f in item_files:
         print(f"  - {f.name}")
 
-    result = run_packing(item_files, space_path)
+    result, voxelizer, packer = run_packing(item_files, space_path)
     print_result(result)
     export_blender(result)
 
     total_elapsed = time.perf_counter() - total_start
-    log("total", total_elapsed,
-        notes=f"placed={result.num_placed} density={result.density:.1%}")
-
     print(f"\n[전체 소요 시간] {total_elapsed:.2f}s")
     print("\n완료!")
 
-    save_csv()
+    save_csv(voxelizer, packer, total_elapsed)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ Examples
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
@@ -22,7 +23,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from .mesh_io import load_mesh
-from .voxelizer import Voxelizer, VoxelizationInfo
+from .voxelizer import Voxelizer, VoxelizationInfo, LogEntry
 from .rotations import get_orientations, make_contiguous
 
 
@@ -237,6 +238,7 @@ class BinPacker:
         interlocking_free: bool = False,
         continuous_refinement: bool = False,
         pitch: Optional[float] = None,
+        verbose: bool = False,
     ):
         if len(tray_size) != 3:
             raise ValueError(f"tray_size must be a 3-tuple, got {len(tray_size)} elements")
@@ -256,7 +258,16 @@ class BinPacker:
         self.interlocking_free = interlocking_free
         self.continuous_refinement = continuous_refinement
         self.pitch = pitch
+        self.verbose = verbose
+        self.log: List[LogEntry] = []
         self._voxelizer = Voxelizer(resolution=voxel_resolution, pitch=pitch)
+
+    def _record(self, step: str, duration: float, success: bool = True, notes: str = ""):
+        entry = LogEntry(step=step, duration_sec=duration, success=success, notes=notes)
+        self.log.append(entry)
+        if self.verbose:
+            status = "OK" if success else "FAIL"
+            print(f"  [{status}] {step}: {duration:.2f}s  {notes}")
 
     def pack_files(
         self,
@@ -455,10 +466,12 @@ class BinPacker:
 
         placements = []
         num_placed = 0
+        pack_start = time.perf_counter()
 
         for idx, (item, orig_idx, volume) in enumerate(
             zip(processed_items, original_indices, volumes)
         ):
+            item_start = time.perf_counter()
             # Try multiple orientations and find the best placement
             best_position = None
             best_score = float('inf')
@@ -540,6 +553,12 @@ class BinPacker:
                     orientation_index=best_orientation_idx,
                     refined_position=refined_pos,
                 ))
+                self._record(
+                    f"place_item:{orig_idx}",
+                    time.perf_counter() - item_start,
+                    True,
+                    f"pos={best_position} orient={best_orientation_idx} score={best_score:.2f}",
+                )
             else:
                 placements.append(PlacementInfo(
                     item_index=orig_idx,
@@ -549,9 +568,23 @@ class BinPacker:
                     volume=volume,
                     orientation_index=0,
                 ))
+                self._record(
+                    f"place_item:{orig_idx}",
+                    time.perf_counter() - item_start,
+                    False,
+                    "no valid placement",
+                )
 
         # Sort placements by original index for consistent ordering
         placements.sort(key=lambda p: p.item_index)
+
+        pack_elapsed = time.perf_counter() - pack_start
+        self._record(
+            "packing_total",
+            pack_elapsed,
+            True,
+            f"placed={num_placed}/{len(items)}",
+        )
 
         # Calculate statistics
         density, total_volume, bbox = self._calculate_stats(tray)
