@@ -123,7 +123,13 @@ def voxelize_items(item_paths: list[Path], pitch: float):
                 vertices, faces = load_mesh(path, validate=True, repair=True)
                 mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
                 bounds = mesh.bounds
-                grid = mesh.voxelized(pitch=pitch).fill().matrix.astype("int32")
+                vox = mesh.voxelized(pitch=pitch)
+                try:
+                    grid = vox.fill().matrix.astype("int32")
+                except Exception:
+                    # fill() 실패 시 표면 복셀만 사용
+                    grid = vox.matrix.astype("int32")
+                    print(f"  [경고] {path.name} fill() 실패 → 표면 복셀 사용")
                 success = True
                 notes = f"shape={grid.shape} voxels={int(grid.sum())}"
             except Exception as e:
