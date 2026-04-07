@@ -14,40 +14,68 @@
     python experiments/container/run.py
 """
 
+import csv
+import sys
+import time
 from pathlib import Path
 
+# Blender가 sys.path를 조작해 site-packages를 무시하는 경우를 대비해 직접 추가
+for _site in ["/usr/local/lib/python3.10/dist-packages", "/workspace"]:
+    if _site not in sys.path:
+        sys.path.insert(0, _site)
+
 # ── 경로 ──────────────────────────────────────────────────────────────────────
-_HERE     = Path(__file__).parent                       # experiments/container/
-INPUT_DIR = _HERE.parent / "input_meshes"               # experiments/input_meshes/
+_HERE        = Path(__file__).parent                    # experiments/container/
+INPUT_DIR    = _HERE.parent / "input_meshes"            # experiments/input_meshes/
 OUTPUT_BLEND = _HERE / "results" / "packed_result.blend"
+OUTPUT_CSV   = _HERE / "results" / "log.csv"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
-# 공간으로 사용할 파일 (input_meshes/ 기준)
-SPACE_FILE = "12281_Container_v2_L2.obj"
-
-# 공간 메시 복셀화 해상도 (긴 축 기준 voxel 수)
-# → 이 값이 컨테이너와 아이템 사이의 공통 pitch를 결정
-SPACE_RESOLUTION = 128
-
-# 회전 수: 1(고정) / 4(Z축) / 6(면별) / 24(전방향)
-NUM_ORIENTATIONS = 6
-
-# 높이 패널티 (클수록 낮게 쌓으려 함)
-HEIGHT_PENALTY = 4.0
-
-# True: 꺼낼 수 있는 위치만 허용
+SPACE_FILE        = "12281_Container_v2_L2.obj"
+SPACE_RESOLUTION  = 128
+NUM_ORIENTATIONS  = 6
+HEIGHT_PENALTY    = 4.0
 INTERLOCKING_FREE = False
-
-# 패킹에서 제외할 파일 (아직 사용하지 않을 파일)
-SKIP_FILES = {"trunk_kona.ply"}
+SKIP_FILES        = {"trunk_kona.ply"}
 # ─────────────────────────────────────────────────────────────────────────────
 
 SUPPORTED_EXTS = {".stl", ".obj", ".ply", ".gltf", ".glb", ".dae", ".3mf"}
 
+# 타이밍 로그: {"step", "duration_sec", "success", "notes"}
+_log: list[dict] = []
+
+
+class Timer:
+    """with 블록 안의 실행 시간을 측정합니다."""
+    def __enter__(self):
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, *_):
+        self.elapsed = time.perf_counter() - self._start
+
+    def __str__(self):
+        return f"{self.elapsed:.2f}s"
+
+
+def log(step: str, duration: float, success: bool = True, notes: str = ""):
+    _log.append({"step": step, "duration_sec": f"{duration:.3f}",
+                  "success": success, "notes": notes})
+    status = "OK" if success else "FAIL"
+    print(f"  [{status}] {step}: {duration:.2f}s  {notes}")
+
+
+def save_csv():
+    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["step", "duration_sec", "success", "notes"])
+        writer.writeheader()
+        writer.writerows(_log)
+    print(f"\n[로그 저장] → {OUTPUT_CSV}")
+
 
 def collect_item_files() -> list[Path]:
-    """공간 파일·스킵 파일을 제외한 아이템 목록을 반환합니다."""
     exclude = SKIP_FILES | {SPACE_FILE}
     return [
         f for f in sorted(INPUT_DIR.iterdir())
@@ -56,53 +84,32 @@ def collect_item_files() -> list[Path]:
 
 
 def voxelize_space(space_path: Path):
-    """
-    공간 메시를 복셀화해 (내부 free, 외부 obstacle) initial_tray와 pitch를 반환합니다.
-
-    Returns
-    -------
-    initial_tray : np.ndarray[int32]
-        0 = 아이템 배치 가능, 1 = 장애물(컨테이너 외부)
-    pitch : float
-        voxel 1칸의 실세계 크기 (아이템 복셀화에 동일하게 사용)
-    tray_size : tuple[int, int, int]
-    """
     import trimesh
     from spectral_packer import load_mesh
 
     print(f"\n[공간 복셀화] {space_path.name}")
+    with Timer() as t:
+        vertices, faces = load_mesh(space_path, validate=True, repair=True)
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
 
-    vertices, faces = load_mesh(space_path, validate=True, repair=True)
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+        max_extent = float(mesh.extents.max())
+        pitch = max_extent / (SPACE_RESOLUTION - 1)
 
-    max_extent = float(mesh.extents.max())
-    pitch = max_extent / (SPACE_RESOLUTION - 1)
+        print(f"  바운딩박스 크기: {mesh.extents.tolist()}")
+        print(f"  pitch          : {pitch:.4f}  (해상도 {SPACE_RESOLUTION})")
 
-    print(f"  바운딩박스 크기: {mesh.extents.tolist()}")
-    print(f"  pitch          : {pitch:.4f}  (해상도 {SPACE_RESOLUTION})")
+        filled = mesh.voxelized(pitch=pitch).fill().matrix.astype("int32")
+        initial_tray = (1 - filled).astype("int32")
+        tray_size = filled.shape
 
-    # fill=True → 내부를 채운 solid 복셀 (1=내부, 0=외부)
-    filled = mesh.voxelized(pitch=pitch).fill().matrix.astype("int32")
+        print(f"  트레이 크기    : {tray_size}")
+        print(f"  내부 free 비율 : {filled.mean():.1%}")
 
-    # initial_tray: 외부(0) → obstacle(1), 내부(1) → free(0)
-    initial_tray = (1 - filled).astype("int32")
-    tray_size = filled.shape
-
-    print(f"  트레이 크기    : {tray_size}")
-    print(f"  내부 free 비율 : {filled.mean():.1%}")
-
+    log("space_voxelization", t.elapsed, notes=f"tray={tray_size}")
     return initial_tray, pitch, tray_size
 
 
 def voxelize_items(item_paths: list[Path], pitch: float):
-    """
-    아이템들을 공통 pitch로 복셀화합니다.
-
-    Returns
-    -------
-    voxels      : list[np.ndarray]
-    voxel_infos : list[VoxelizationInfo]
-    """
     import trimesh
     from spectral_packer import load_mesh
     from spectral_packer.voxelizer import VoxelizationInfo
@@ -111,43 +118,44 @@ def voxelize_items(item_paths: list[Path], pitch: float):
 
     print(f"\n[아이템 복셀화] pitch={pitch:.4f}")
     for path in item_paths:
-        vertices, faces = load_mesh(path, validate=True, repair=True)
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+        with Timer() as t:
+            try:
+                vertices, faces = load_mesh(path, validate=True, repair=True)
+                mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                bounds = mesh.bounds
+                grid = mesh.voxelized(pitch=pitch).fill().matrix.astype("int32")
+                success = True
+                notes = f"shape={grid.shape} voxels={int(grid.sum())}"
+            except Exception as e:
+                success = False
+                notes = str(e)
+                print(f"  [경고] {path.name} 복셀화 실패: {e} → 건너뜀")
 
-        bounds = mesh.bounds
-        try:
-            grid = mesh.voxelized(pitch=pitch).fill().matrix.astype("int32")
-        except Exception as e:
-            print(f"  [경고] {path.name} 복셀화 실패: {e} → 건너뜀")
-            continue
+        log(f"item_voxelization:{path.name}", t.elapsed, success, notes)
 
-        voxels.append(grid)
-        voxel_infos.append(VoxelizationInfo(
-            mesh_path=path,
-            mesh_bounds_min=bounds[0].copy(),
-            mesh_bounds_max=bounds[1].copy(),
-            pitch=pitch,
-            voxel_shape=grid.shape,
-        ))
-        print(f"  {path.name:40s} → {grid.shape}  ({int(grid.sum())} voxels)")
+        if success:
+            voxels.append(grid)
+            voxel_infos.append(VoxelizationInfo(
+                mesh_path=path,
+                mesh_bounds_min=bounds[0].copy(),
+                mesh_bounds_max=bounds[1].copy(),
+                pitch=pitch,
+                voxel_shape=grid.shape,
+            ))
+            print(f"  {path.name:40s} → {grid.shape}  ({int(grid.sum())} voxels)")
 
     return voxels, voxel_infos
 
 
 def run_packing(item_paths: list[Path], space_path: Path):
-    """컨테이너 내부에 아이템들을 패킹하고 PackingResult를 반환합니다."""
     from spectral_packer import BinPacker
     from spectral_packer.packer import MeshPlacementInfo
 
-    # 1. 공간 복셀화
     initial_tray, pitch, tray_size = voxelize_space(space_path)
-
-    # 2. 아이템 복셀화 (동일 pitch → 비율 보장)
     voxels, voxel_infos = voxelize_items(item_paths, pitch)
     if not voxels:
         raise ValueError("복셀화된 아이템이 없습니다.")
 
-    # 3. 패킹
     print(f"\n[패킹 시작]  아이템 {len(voxels)}개  트레이 {tray_size}")
     packer = BinPacker(
         tray_size=tray_size,
@@ -157,9 +165,13 @@ def run_packing(item_paths: list[Path], space_path: Path):
         interlocking_free=INTERLOCKING_FREE,
         pitch=pitch,
     )
-    result = packer.pack_voxels(voxels, initial_tray=initial_tray)
 
-    # 4. Blender 내보내기용 메타데이터
+    with Timer() as t:
+        result = packer.pack_voxels(voxels, initial_tray=initial_tray)
+
+    log("packing", t.elapsed,
+        notes=f"placed={result.num_placed}/{len(voxels)} density={result.density:.1%}")
+
     result.mesh_placements = [
         MeshPlacementInfo(
             mesh_path=voxel_infos[p.item_index].mesh_path,
@@ -199,14 +211,15 @@ def export_blender(result):
 
     OUTPUT_BLEND.parent.mkdir(parents=True, exist_ok=True)
     print(f"\n[Blender 내보내기] → {OUTPUT_BLEND}")
-    export_to_blend(result=result, output_path=OUTPUT_BLEND, include_tray_boundary=True)
+    with Timer() as t:
+        export_to_blend(result=result, output_path=OUTPUT_BLEND, include_tray_boundary=True)
+    log("blender_export", t.elapsed, notes=str(OUTPUT_BLEND))
     print("  저장 완료!")
 
     render_scene(result)
 
 
 def render_scene(result):
-    """Blender 씬에 조명·카메라·머티리얼을 설정하고 PNG를 렌더링합니다."""
     import math
     import mathutils
     import bpy
@@ -222,7 +235,6 @@ def render_scene(result):
         print("  [경고] 렌더링할 메시 오브젝트 없음")
         return
 
-    # 씬 바운딩박스 계산
     min_coords = [float('inf')] * 3
     max_coords = [float('-inf')] * 3
     for obj in mesh_objects:
@@ -235,7 +247,6 @@ def render_scene(result):
     center = [(min_coords[i] + max_coords[i]) / 2 for i in range(3)]
     max_size = max(max_coords[i] - min_coords[i] for i in range(3))
 
-    # 렌더 설정
     scene = bpy.context.scene
     scene.render.engine = 'CYCLES'
     scene.cycles.device = 'GPU'
@@ -244,7 +255,6 @@ def render_scene(result):
     scene.render.resolution_y = 960
     scene.render.image_settings.file_format = 'PNG'
 
-    # 월드 배경
     world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')
     scene.world = world
     world.use_nodes = True
@@ -256,7 +266,6 @@ def render_scene(result):
     out = nodes.new('ShaderNodeOutputWorld')
     world.node_tree.links.new(bg.outputs['Background'], out.inputs['Surface'])
 
-    # 기존 조명 제거 후 새 조명 추가
     for obj in list(bpy.data.objects):
         if obj.type == 'LIGHT':
             bpy.data.objects.remove(obj)
@@ -265,7 +274,6 @@ def render_scene(result):
     sun.data.energy = 3
     sun.rotation_euler = (math.radians(45), math.radians(20), math.radians(30))
 
-    # 아이템별 머티리얼 색상
     colors = [
         (0.9, 0.25, 0.2, 1), (0.2, 0.75, 0.3, 1), (0.2, 0.4, 0.9, 1),
         (0.95, 0.7, 0.1, 1), (0.7, 0.2, 0.8, 1), (0.1, 0.8, 0.8, 1),
@@ -281,12 +289,10 @@ def render_scene(result):
         obj.data.materials.clear()
         obj.data.materials.append(mat)
 
-    # 트레이 경계선 렌더에서 숨기기
     for obj in bpy.data.objects:
         if obj.name.startswith('Tray'):
             obj.hide_render = True
 
-    # 카메라 설정
     bpy.ops.object.camera_add()
     camera = bpy.context.active_object
     scene.camera = camera
@@ -304,15 +310,19 @@ def render_scene(result):
 
     print(f"\n[렌더링] → {OUTPUT_RENDERS}")
     for view_name, cam_loc in views:
-        camera.location = cam_loc
-        point_camera_at(camera, center)
-        output_path = OUTPUT_RENDERS / f"{view_name}.png"
-        scene.render.filepath = str(output_path)
-        bpy.ops.render.render(write_still=True)
+        with Timer() as t:
+            camera.location = cam_loc
+            point_camera_at(camera, center)
+            output_path = OUTPUT_RENDERS / f"{view_name}.png"
+            scene.render.filepath = str(output_path)
+            bpy.ops.render.render(write_still=True)
+        log(f"render:{view_name}", t.elapsed, notes=str(output_path))
         print(f"  저장: {output_path}")
 
 
 def main():
+    total_start = time.perf_counter()
+
     print("=" * 55)
     print("  실험 1: Container 공간 패킹")
     print("=" * 55)
@@ -331,7 +341,14 @@ def main():
     print_result(result)
     export_blender(result)
 
+    total_elapsed = time.perf_counter() - total_start
+    log("total", total_elapsed,
+        notes=f"placed={result.num_placed} density={result.density:.1%}")
+
+    print(f"\n[전체 소요 시간] {total_elapsed:.2f}s")
     print("\n완료!")
+
+    save_csv()
 
 
 if __name__ == "__main__":
