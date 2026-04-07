@@ -76,7 +76,6 @@ class Voxelizer:
         self,
         resolution: int = 128,
         pitch: Optional[float] = None,
-        verbose: bool = False,
     ):
         if resolution <= 0:
             raise ValueError(f"resolution must be positive, got {resolution}")
@@ -84,15 +83,10 @@ class Voxelizer:
             raise ValueError(f"pitch must be positive, got {pitch}")
         self.resolution = resolution
         self.pitch = pitch
-        self.verbose = verbose
         self.log: List[LogEntry] = []
 
     def _record(self, step: str, duration: float, success: bool = True, notes: str = ""):
-        entry = LogEntry(step=step, duration_sec=duration, success=success, notes=notes)
-        self.log.append(entry)
-        if self.verbose:
-            status = "OK" if success else "FAIL"
-            print(f"  [{status}] {step}: {duration:.2f}s  {notes}")
+        self.log.append(LogEntry(step=step, duration_sec=duration, success=success, notes=notes))
 
     def voxelize_space(self, path: Union[str, Path]) -> Tuple[np.ndarray, float, tuple]:
         """
@@ -125,28 +119,20 @@ class Voxelizer:
         max_extent = float(mesh.extents.max())
         pitch = self.pitch if self.pitch is not None else max_extent / (self.resolution - 1)
 
-        if self.verbose:
-            print(f"\n[공간 복셀화] {path.name}")
-            print(f"  바운딩박스 크기: {mesh.extents.tolist()}")
-            print(f"  pitch          : {pitch:.4f}  (해상도 {self.resolution})")
-
         try:
             filled = mesh.voxelized(pitch=pitch).fill().matrix.astype("int32")
         except Exception as e:
             filled = mesh.voxelized(pitch=pitch).matrix.astype("int32")
-            if self.verbose:
-                print(f"  [경고] fill() 실패 → 표면 복셀 사용: {e}")
+            self._record("space_voxelization_fill_fallback", 0, False, str(e))
 
         initial_tray = (1 - filled).astype("int32")
         tray_size = filled.shape
-
         elapsed = time.perf_counter() - t0
 
-        if self.verbose:
-            print(f"  트레이 크기    : {tray_size}")
-            print(f"  내부 free 비율 : {filled.mean():.1%}")
-
-        self._record("space_voxelization", elapsed, notes=f"tray={tray_size}")
+        self._record(
+            "space_voxelization", elapsed,
+            notes=f"tray={tray_size} pitch={pitch:.4f} free={filled.mean():.1%}",
+        )
         return initial_tray, pitch, tray_size
 
     def voxelize_item(
@@ -184,10 +170,9 @@ class Voxelizer:
             vox = mesh.voxelized(pitch=pitch)
             try:
                 grid = vox.fill().matrix.astype("int32")
-            except Exception:
+            except Exception as e:
                 grid = vox.matrix.astype("int32")
-                if self.verbose:
-                    print(f"  [경고] {path.name} fill() 실패 → 표면 복셀 사용")
+                self._record(f"item_voxelization_fill_fallback:{path.name}", 0, False, str(e))
 
             info = VoxelizationInfo(
                 mesh_path=path,
@@ -198,20 +183,53 @@ class Voxelizer:
             )
 
             elapsed = time.perf_counter() - t0
-            notes = f"shape={grid.shape} voxels={int(grid.sum())}"
-            self._record(f"item_voxelization:{path.name}", elapsed, True, notes)
-
-            if self.verbose:
-                print(f"  {path.name:40s} → {grid.shape}  ({int(grid.sum())} voxels)")
-
+            self._record(
+                f"item_voxelization:{path.name}", elapsed, True,
+                f"shape={grid.shape} voxels={int(grid.sum())}",
+            )
             return grid, info
 
         except Exception as e:
             elapsed = time.perf_counter() - t0
             self._record(f"item_voxelization:{path.name}", elapsed, False, str(e))
-            if self.verbose:
-                print(f"  [경고] {path.name} 복셀화 실패: {e} → 건너뜀")
             return None, None
+
+    def voxelize_items(
+        self,
+        paths: List[Union[str, Path]],
+        pitch: float,
+    ) -> Tuple[List[np.ndarray], List[VoxelizationInfo]]:
+        """
+        여러 아이템 메시를 일괄 복셀화합니다.
+
+        Parameters
+        ----------
+        paths : list of str or Path
+            메시 파일 경로 목록.
+        pitch : float
+            voxel 크기 (공간과 동일한 값 사용).
+
+        Returns
+        -------
+        voxels : list of np.ndarray
+            복셀화 성공한 그리드 목록.
+        infos : list of VoxelizationInfo
+            대응하는 메타데이터 목록.
+        """
+        t0 = time.perf_counter()
+        voxels, infos = [], []
+        for path in paths:
+            grid, info = self.voxelize_item(path, pitch)
+            if grid is not None:
+                voxels.append(grid)
+                infos.append(info)
+
+        self._record(
+            "items_voxelization_total",
+            time.perf_counter() - t0,
+            notes=f"success={len(voxels)}/{len(paths)}",
+        )
+        return voxels, infos
 
     def voxelize_file(
         self,
@@ -357,5 +375,5 @@ class Voxelizer:
     def __repr__(self) -> str:
         return (
             f"Voxelizer(resolution={self.resolution}, pitch={self.pitch}, "
-            f"verbose={self.verbose})"
+            f"pitch={self.pitch})"
         )

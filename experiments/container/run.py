@@ -38,6 +38,15 @@ NUM_ORIENTATIONS  = 6
 HEIGHT_PENALTY    = 4.0
 INTERLOCKING_FREE = False
 SKIP_FILES        = {"trunk_kona.ply"}
+
+# 파일명 → 반복 횟수 (지정하지 않으면 1개)
+ITEM_COUNTS = {
+    "Box.stl":               9,
+    "Crate1.obj":            7,
+    "pc low poly.obj":       5,
+    "server computer.obj":   3,
+    "ServerV2+console.obj":  2,
+}
 # ─────────────────────────────────────────────────────────────────────────────
 
 SUPPORTED_EXTS = {".stl", ".obj", ".ply", ".gltf", ".glb", ".dae", ".3mf"}
@@ -46,12 +55,7 @@ SUPPORTED_EXTS = {".stl", ".obj", ".ply", ".gltf", ".glb", ".dae", ".3mf"}
 def save_csv(voxelizer, packer, total_elapsed):
     from spectral_packer.voxelizer import LogEntry
     entries = voxelizer.log + packer.log + [
-        LogEntry(
-            step="total",
-            duration_sec=total_elapsed,
-            success=True,
-            notes=f"placed={packer.log[-1].notes if packer.log else '?'}",
-        )
+        LogEntry(step="total", duration_sec=total_elapsed, success=True),
     ]
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
@@ -64,15 +68,15 @@ def save_csv(voxelizer, packer, total_elapsed):
                 "success": e.success,
                 "notes": e.notes,
             })
-    print(f"\n[로그 저장] → {OUTPUT_CSV}")
 
 
 def collect_item_files() -> list:
     exclude = SKIP_FILES | {SPACE_FILE}
-    return [
+    files = [
         f for f in sorted(INPUT_DIR.iterdir())
         if f.suffix.lower() in SUPPORTED_EXTS and f.name not in exclude
     ]
+    return [f for f in files for _ in range(ITEM_COUNTS.get(f.name, 1))]
 
 
 def run_packing(item_paths: list, space_path: Path):
@@ -80,23 +84,13 @@ def run_packing(item_paths: list, space_path: Path):
     from spectral_packer.packer import MeshPlacementInfo
     from spectral_packer.voxelizer import Voxelizer
 
-    voxelizer = Voxelizer(resolution=SPACE_RESOLUTION, verbose=True)
-
-    print(f"\n[공간 복셀화] {space_path.name}")
+    voxelizer = Voxelizer(resolution=SPACE_RESOLUTION)
     initial_tray, pitch, tray_size = voxelizer.voxelize_space(space_path)
-
-    print(f"\n[아이템 복셀화] pitch={pitch:.4f}")
-    voxels, voxel_infos = [], []
-    for path in item_paths:
-        grid, info = voxelizer.voxelize_item(path, pitch)
-        if grid is not None:
-            voxels.append(grid)
-            voxel_infos.append(info)
+    voxels, voxel_infos = voxelizer.voxelize_items(item_paths, pitch)
 
     if not voxels:
         raise ValueError("복셀화된 아이템이 없습니다.")
 
-    print(f"\n[패킹 시작]  아이템 {len(voxels)}개  트레이 {tray_size}")
     packer = BinPacker(
         tray_size=tray_size,
         voxel_resolution=SPACE_RESOLUTION,
@@ -104,11 +98,9 @@ def run_packing(item_paths: list, space_path: Path):
         height_penalty=HEIGHT_PENALTY,
         interlocking_free=INTERLOCKING_FREE,
         pitch=pitch,
-        verbose=True,
     )
 
     result = packer.pack_voxels(voxels, initial_tray=initial_tray)
-
     result.mesh_placements = [
         MeshPlacementInfo(
             mesh_path=voxel_infos[p.item_index].mesh_path,
@@ -120,19 +112,7 @@ def run_packing(item_paths: list, space_path: Path):
         )
         for p in result.placements
     ]
-
     return result, voxelizer, packer
-
-
-def print_result(result):
-    print("\n" + result.summary())
-    print("\n[개별 배치 결과]")
-    for p in result.placements:
-        if p.success:
-            print(f"  Item {p.item_index:2d}: 배치 완료  위치={p.position}  "
-                  f"방향={p.orientation_index}  점수={p.score:.2f}")
-        else:
-            print(f"  Item {p.item_index:2d}: 배치 실패")
 
 
 def export_blender(result):
@@ -152,10 +132,10 @@ def export_blender(result):
     export_to_blend(result=result, output_path=OUTPUT_BLEND, include_tray_boundary=True)
     print(f"  저장 완료! ({time.perf_counter() - t0:.2f}s)")
 
-    render_scene(result)
+    render_scene()
 
 
-def render_scene(result):
+def render_scene():
     import math
     import mathutils
     import bpy
@@ -258,28 +238,15 @@ def render_scene(result):
 def main():
     total_start = time.perf_counter()
 
-    print("=" * 55)
-    print("  실험 1: Container 공간 패킹")
-    print("=" * 55)
-
     space_path = INPUT_DIR / SPACE_FILE
     if not space_path.exists():
         raise FileNotFoundError(f"공간 파일 없음: {space_path}")
 
     item_files = collect_item_files()
-    print(f"\n[공간 파일] {SPACE_FILE}")
-    print(f"[아이템 파일]")
-    for f in item_files:
-        print(f"  - {f.name}")
-
     result, voxelizer, packer = run_packing(item_files, space_path)
-    print_result(result)
     export_blender(result)
 
     total_elapsed = time.perf_counter() - total_start
-    print(f"\n[전체 소요 시간] {total_elapsed:.2f}s")
-    print("\n완료!")
-
     save_csv(voxelizer, packer, total_elapsed)
 
 

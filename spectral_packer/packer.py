@@ -263,11 +263,7 @@ class BinPacker:
         self._voxelizer = Voxelizer(resolution=voxel_resolution, pitch=pitch)
 
     def _record(self, step: str, duration: float, success: bool = True, notes: str = ""):
-        entry = LogEntry(step=step, duration_sec=duration, success=success, notes=notes)
-        self.log.append(entry)
-        if self.verbose:
-            status = "OK" if success else "FAIL"
-            print(f"  [{status}] {step}: {duration:.2f}s  {notes}")
+        self.log.append(LogEntry(step=step, duration_sec=duration, success=success, notes=notes))
 
     def pack_files(
         self,
@@ -382,6 +378,8 @@ class BinPacker:
 
         result.mesh_placements = mesh_placements
         return result
+
+
 
     def pack_voxels(
         self,
@@ -589,7 +587,7 @@ class BinPacker:
         # Calculate statistics
         density, total_volume, bbox = self._calculate_stats(tray)
 
-        return PackingResult(
+        result = PackingResult(
             tray=tray,
             placements=placements,
             num_placed=num_placed,
@@ -598,6 +596,8 @@ class BinPacker:
             total_volume=total_volume,
             bounding_box=bbox,
         )
+
+        return result
 
     def pack_single(
         self,
