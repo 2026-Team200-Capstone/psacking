@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     git \
+    ffmpeg \
     libfftw3-dev \
     wget \
     xz-utils \
@@ -21,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxxf86vm1 \
     libxrender1 \
     libgl1 \
+    libegl1 \
+    libgl1-mesa-dri \
+    libglu1-mesa \
     libxkbcommon0 \
     libsm6 \
     libice6 \
