@@ -80,7 +80,7 @@ def run_packing(voxels: list):
     from spectral_packer.voxelizer import Voxelizer
 
     voxelizer = Voxelizer(resolution=SPACE_RESOLUTION)
-    initial_tray, pitch, tray_size = voxelizer.voxelize_space(SPACE_FILE)
+    initial_tray, pitch, tray_size, _ = voxelizer.voxelize_space(SPACE_FILE)
 
     print(f"\n[박스 아이템] {len(voxels)}개")
     for i, (_, label) in enumerate(zip(voxels, labels)):

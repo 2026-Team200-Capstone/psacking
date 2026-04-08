@@ -88,9 +88,9 @@ class Voxelizer:
     def _record(self, step: str, duration: float, success: bool = True, notes: str = ""):
         self.log.append(LogEntry(step=step, duration_sec=duration, success=success, notes=notes))
 
-    def voxelize_space(self, path: Union[str, Path]) -> Tuple[np.ndarray, float, tuple]:
+    def voxelize_space(self, path: Union[str, Path]) -> Tuple[np.ndarray, float, tuple, np.ndarray]:
         """
-        공간 메시를 복셀화해 initial_tray(장애물 그리드), pitch, tray_size를 반환합니다.
+        공간 메시를 복셀화해 initial_tray(장애물 그리드), pitch, tray_size, voxel_origin을 반환합니다.
 
         내부(1) → free(0), 외부(0) → obstacle(1)로 반전해 반환합니다.
 
@@ -107,6 +107,8 @@ class Voxelizer:
             voxel 1칸의 실세계 크기
         tray_size : tuple[int, int, int]
             initial_tray의 shape
+        voxel_origin : np.ndarray shape (3,)
+            voxel (0,0,0)의 실제 월드 좌표 (trimesh VoxelGrid.origin)
         """
         import trimesh
 
@@ -120,20 +122,35 @@ class Voxelizer:
         pitch = self.pitch if self.pitch is not None else max_extent / (self.resolution - 1)
 
         try:
-            filled = mesh.voxelized(pitch=pitch).fill().matrix.astype("int32")
+            voxelgrid = mesh.voxelized(pitch=pitch).fill()
         except Exception as e:
-            filled = mesh.voxelized(pitch=pitch).matrix.astype("int32")
+            voxelgrid = mesh.voxelized(pitch=pitch)
             self._record("space_voxelization_fill_fallback", 0, False, str(e))
 
-        initial_tray = (1 - filled).astype("int32")
+        filled = voxelgrid.matrix.astype("int32")
+        # trimesh 버전에 따라 origin 속성명이 다름
+        if hasattr(voxelgrid, 'origin'):
+            voxel_origin = np.array(voxelgrid.origin, dtype=np.float64)
+        else:
+            # transform은 4x4 행렬, translation은 마지막 열 상위 3개
+            voxel_origin = np.array(voxelgrid.transform[:3, 3], dtype=np.float64)
+
+        # 벽 경계 voxel에 아이템이 배치되면 실제 메시를 뚫고 나가므로
+        # free space를 1복셀 침식(erosion)해 안전 여유 확보
+        from scipy.ndimage import binary_erosion
+        free_mask = filled.astype(bool)
+        free_mask_eroded = binary_erosion(free_mask, iterations=1)
+        filled_eroded = free_mask_eroded.astype("int32")
+
+        initial_tray = (1 - filled_eroded).astype("int32")
         tray_size = filled.shape
         elapsed = time.perf_counter() - t0
 
         self._record(
             "space_voxelization", elapsed,
-            notes=f"tray={tray_size} pitch={pitch:.4f} free={filled.mean():.1%}",
+            notes=f"tray={tray_size} pitch={pitch:.4f} free={filled.mean():.1%} free_after_erosion={filled_eroded.mean():.1%}",
         )
-        return initial_tray, pitch, tray_size
+        return initial_tray, pitch, tray_size, voxel_origin
 
     def voxelize_item(
         self,

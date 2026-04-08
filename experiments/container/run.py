@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-실험 1: Container를 공간으로 사용한 3D Bin Packing
-=================================================
+실험: Container 공간에 합성 박스 아이템 3D Bin Packing
+======================================================
 
-12281_Container_v2_L2.obj 내부에 나머지 아이템들을 패킹하고
-결과를 results/packed_result.blend 로 내보냅니다.
+12281_Container_v2_L2.obj 내부 공간에 numpy로 정의한 다양한 크기의 박스를
+패킹하고 결과를 results/packed_result.blend 로 내보냅니다.
 
 사용법:
-    # Blender 내장 Python으로 실행 (시각화 포함)
-    blender --background --python experiments/container/run.py
-
-    # 일반 Python으로 패킹만 실행 (bpy 없어도 됨)
+    # 패킹만 (bpy 없어도 됨)
     python experiments/container/run.py
+
+    # 패킹 + .blend 생성
+    blender --background --python experiments/container/run.py
 """
 
 import csv
@@ -19,108 +19,94 @@ import sys
 import time
 from pathlib import Path
 
-# Blender가 sys.path를 조작해 site-packages를 무시하는 경우를 대비해 직접 추가
+import numpy as np
+
+# Blender가 sys.path를 조작하는 경우 대비
 for _site in ["/usr/local/lib/python3.10/dist-packages", "/workspace"]:
     if _site not in sys.path:
         sys.path.insert(0, _site)
 
-# ── 경로 ──────────────────────────────────────────────────────────────────────
-_HERE        = Path(__file__).parent                    # experiments/container/
-INPUT_DIR    = _HERE.parent / "input_meshes"            # experiments/input_meshes/
+_HERE        = Path(__file__).parent
+INPUT_DIR    = _HERE.parent / "input_meshes"
 OUTPUT_BLEND = _HERE / "results" / "packed_result.blend"
 OUTPUT_CSV   = _HERE / "results" / "log.csv"
-# ─────────────────────────────────────────────────────────────────────────────
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 SPACE_FILE        = "12281_Container_v2_L2.obj"
 SPACE_RESOLUTION  = 128
 NUM_ORIENTATIONS  = 6
 HEIGHT_PENALTY    = 4.0
-INTERLOCKING_FREE = False
-SKIP_FILES        = {"trunk_kona.ply"}
 
-# 파일명 → 반복 횟수 (지정하지 않으면 1개)
-ITEM_COUNTS = {
-    "Box.stl":               9,
-    "Crate1.obj":            7,
-    "pc low poly.obj":       5,
-    "server computer.obj":   3,
-    "ServerV2+console.obj":  2,
-}
+# 아이템 정의: (이름, 복셀 크기 (x,y,z), 개수)
+# pitch는 컨테이너 복셀화 후 결정 → 아이템 크기도 pitch 기준
+# 컨테이너가 약 128×54×53 복셀이므로 아이템은 그에 맞게 설정
+ITEM_TYPES = [
+    ("large_box",  (20, 15, 10),  4),
+    ("medium_box", (12, 10,  8),  8),
+    ("flat_box",   (18, 12,  3),  8),
+    ("tall_box",   ( 6,  6, 15),  8),
+    ("small_box",  ( 8,  6,  4), 15),
+    ("tiny_box",   ( 5,  4,  3), 20),
+]
+
+# 아이템 타입별 색상 (RGBA)
+COLORS = [
+    (0.90, 0.25, 0.20, 1.0),
+    (0.20, 0.75, 0.30, 1.0),
+    (0.20, 0.40, 0.90, 1.0),
+    (0.95, 0.70, 0.10, 1.0),
+    (0.70, 0.20, 0.80, 1.0),
+    (0.10, 0.80, 0.80, 1.0),
+]
 # ─────────────────────────────────────────────────────────────────────────────
 
-SUPPORTED_EXTS = {".stl", ".obj", ".ply", ".gltf", ".glb", ".dae", ".3mf"}
+
+def make_box(shape):
+    return np.ones(shape, dtype=np.int32)
 
 
-def save_csv(voxelizer, packer, total_elapsed):
-    from spectral_packer.voxelizer import LogEntry
-    entries = voxelizer.log + packer.log + [
-        LogEntry(step="total", duration_sec=total_elapsed, success=True),
-    ]
-    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["step", "duration_sec", "success", "notes"])
-        writer.writeheader()
-        for e in entries:
-            writer.writerow({
-                "step": e.step,
-                "duration_sec": f"{e.duration_sec:.3f}",
-                "success": e.success,
-                "notes": e.notes,
-            })
+def build_items():
+    items = []
+    meta  = []
+    for type_idx, (type_name, shape, count) in enumerate(ITEM_TYPES):
+        for _ in range(count):
+            items.append(make_box(shape))
+            meta.append((type_name, shape, type_idx))
+    return items, meta
 
 
-def collect_item_files() -> list:
-    exclude = SKIP_FILES | {SPACE_FILE}
-    files = [
-        f for f in sorted(INPUT_DIR.iterdir())
-        if f.suffix.lower() in SUPPORTED_EXTS and f.name not in exclude
-    ]
-    return [f for f in files for _ in range(ITEM_COUNTS.get(f.name, 1))]
-
-
-def run_packing(item_paths: list, space_path: Path):
+def run_packing(items, space_path):
     from spectral_packer import BinPacker
-    from spectral_packer.packer import MeshPlacementInfo
     from spectral_packer.voxelizer import Voxelizer
 
     voxelizer = Voxelizer(resolution=SPACE_RESOLUTION)
-    initial_tray, pitch, tray_size = voxelizer.voxelize_space(space_path)
-    voxels, voxel_infos = voxelizer.voxelize_items(item_paths, pitch)
-
-    if not voxels:
-        raise ValueError("복셀화된 아이템이 없습니다.")
+    initial_tray, pitch, tray_size, voxel_origin = voxelizer.voxelize_space(space_path)
 
     packer = BinPacker(
         tray_size=tray_size,
         voxel_resolution=SPACE_RESOLUTION,
         num_orientations=NUM_ORIENTATIONS,
         height_penalty=HEIGHT_PENALTY,
-        interlocking_free=INTERLOCKING_FREE,
         pitch=pitch,
     )
 
-    result = packer.pack_voxels(voxels, initial_tray=initial_tray)
-    result.mesh_placements = [
-        MeshPlacementInfo(
-            mesh_path=voxel_infos[p.item_index].mesh_path,
-            voxel_info=voxel_infos[p.item_index],
-            voxel_position=p.position,
-            orientation_index=p.orientation_index,
-            success=p.success,
-            refined_position=p.refined_position,
-        )
-        for p in result.placements
-    ]
-    return result, voxelizer, packer
+    result = packer.pack_voxels(items, initial_tray=initial_tray)
+    return result, packer, voxelizer, pitch, voxel_origin
 
 
-def export_blender(result):
-    from spectral_packer import export_to_blend, is_blender_available
+def get_rotated_shape(original_shape, orientation_idx):
+    from spectral_packer.rotations import get_rotation_matrix_3x3
+    R = get_rotation_matrix_3x3(orientation_idx)
+    rotated = np.abs(R) @ np.array(original_shape, dtype=float)
+    return tuple(int(round(v)) for v in rotated)
 
-    if not is_blender_available():
+
+def export_blender(result, meta, pitch, voxel_origin, space_path):
+    try:
+        import bpy
+    except ImportError:
         print(
-            "\n[경고] bpy 없음 → Blender 내보내기 건너뜀\n"
+            "\n[경고] bpy 없음 → Blender export 건너뜀\n"
             "실행 방법:\n"
             "  blender --background --python experiments/container/run.py"
         )
@@ -129,122 +115,140 @@ def export_blender(result):
     OUTPUT_BLEND.parent.mkdir(parents=True, exist_ok=True)
     print(f"\n[Blender 내보내기] → {OUTPUT_BLEND}")
     t0 = time.perf_counter()
-    export_to_blend(result=result, output_path=OUTPUT_BLEND, include_tray_boundary=True)
-    print(f"  저장 완료! ({time.perf_counter() - t0:.2f}s)")
 
-    render_scene()
+    bpy.ops.wm.read_factory_settings(use_empty=True)
 
-
-def render_scene():
-    import math
-    import mathutils
-    import bpy
-
-    OUTPUT_RENDERS = OUTPUT_BLEND.parent / "renders"
-    OUTPUT_RENDERS.mkdir(parents=True, exist_ok=True)
-
-    # 씬 평가 강제 갱신
-    bpy.context.view_layer.update()
-
-    mesh_objects = [
-        obj for obj in bpy.data.objects
-        if obj.type == 'MESH' and not obj.name.startswith('Tray')
-    ]
-    print(f"  [렌더링] 메시 오브젝트 수: {len(mesh_objects)}")
-    for obj in mesh_objects:
-        print(f"    - {obj.name}: location={tuple(round(x,2) for x in obj.location)}")
-
-    if not mesh_objects:
-        print("  [경고] 렌더링할 메시 오브젝트 없음")
-        return
-
-    min_coords = [float('inf')] * 3
-    max_coords = [float('-inf')] * 3
-    for obj in mesh_objects:
-        for v in obj.bound_box:
-            world_v = obj.matrix_world @ mathutils.Vector(v)
-            for i in range(3):
-                min_coords[i] = min(min_coords[i], world_v[i])
-                max_coords[i] = max(max_coords[i], world_v[i])
-
-    center = [(min_coords[i] + max_coords[i]) / 2 for i in range(3)]
-    size = [max_coords[i] - min_coords[i] for i in range(3)]
-    max_size = max(size)
-    print(f"  [렌더링] 씬 중심: {[round(x,2) for x in center]}, 크기: {[round(x,2) for x in size]}")
-
-    scene = bpy.context.scene
-    # WORKBENCH: GPU/OpenGL 없이 headless에서 가장 안정적
-    scene.render.engine = 'BLENDER_WORKBENCH'
-    scene.display.shading.light = 'STUDIO'
-    scene.display.shading.color_type = 'MATERIAL'
-    scene.display.shading.show_shadows = True
-    scene.render.resolution_x = 1280
-    scene.render.resolution_y = 960
-    scene.render.image_settings.file_format = 'PNG'
-
-    colors = [
-        (0.9, 0.25, 0.2, 1), (0.2, 0.75, 0.3, 1), (0.2, 0.4, 0.9, 1),
-        (0.95, 0.7, 0.1, 1), (0.7, 0.2, 0.8, 1), (0.1, 0.8, 0.8, 1),
-        (0.95, 0.5, 0.5, 1), (0.5, 0.8, 0.2, 1), (0.3, 0.3, 0.7, 1),
-        (0.9, 0.6, 0.4, 1),
-    ]
-    for i, obj in enumerate(mesh_objects):
-        mat = bpy.data.materials.new(name=f"Mat_{i}")
+    # 컨테이너 메시 임포트
+    # axis 변환 없이 임포트해야 trimesh voxel 좌표계와 일치함
+    print(f"  [Blender] voxel_origin={voxel_origin.tolist()}")
+    suffix = space_path.suffix.lower()
+    bpy.ops.object.select_all(action='DESELECT')
+    if suffix == '.obj':
+        if hasattr(bpy.ops.wm, 'obj_import'):
+            # Blender 4.0+: forward_axis='Y', up_axis='Z' → 축 변환 없음
+            bpy.ops.wm.obj_import(filepath=str(space_path), forward_axis='Y', up_axis='Z')
+        else:
+            # Blender 3.x: axis_forward='Y', axis_up='Z' → 축 변환 없음
+            bpy.ops.import_scene.obj(filepath=str(space_path), axis_forward='Y', axis_up='Z')
+    container_objs = list(bpy.context.selected_objects)
+    for obj in container_objs:
+        obj.name = "Container"
+        # 반투명 재질
+        mat = bpy.data.materials.new(name="Container_Mat")
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes["Principled BSDF"]
-        bsdf.inputs["Base Color"].default_value = colors[i % len(colors)]
-        bsdf.inputs["Roughness"].default_value = 0.4
+        bsdf.inputs["Base Color"].default_value = (0.8, 0.8, 0.8, 1.0)
+        bsdf.inputs["Alpha"].default_value = 0.3
+        mat.blend_method = 'BLEND'
         obj.data.materials.clear()
         obj.data.materials.append(mat)
 
-    for obj in bpy.data.objects:
-        if obj.name.startswith('Tray'):
-            obj.hide_render = True
+    # 배치 성공 아이템 → box mesh 생성
+    placed = [p for p in result.placements if p.success]
+    for i, p in enumerate(placed):
+        type_name, original_shape, type_idx = meta[p.item_index]
+        rshape = get_rotated_shape(original_shape, p.orientation_index)
 
-    # bpy.ops 대신 bpy.data로 카메라 생성 (headless context 문제 회피)
-    cam_data = bpy.data.cameras.new(name="RenderCam")
-    cam_data.lens = 50
-    cam_data.clip_start = 0.1
-    cam_data.clip_end = cam_distance * 4  # 카메라 거리의 4배로 충분한 클리핑 범위 확보
-    cam_obj = bpy.data.objects.new("RenderCam", cam_data)
-    scene.collection.objects.link(cam_obj)
-    scene.camera = cam_obj
+        # 복셀 좌표 → 월드 좌표 (center)
+        # voxel_origin = 복셀(0,0,0)의 중심 좌표이므로
+        # 아이템 중심 = voxel_origin + (position + (rshape-1)/2) * pitch
+        center = voxel_origin + (np.array(p.position) + (np.array(rshape) - 1) / 2.0) * pitch
 
-    def point_camera_at(cam, target):
-        direction = mathutils.Vector(target) - mathutils.Vector(cam.location)
-        cam.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+        bpy.ops.mesh.primitive_cube_add(size=1.0)
+        obj = bpy.context.active_object
+        obj.name = f"Item_{i:03d}_{type_name}"
+        obj.scale = (rshape[0] * pitch, rshape[1] * pitch, rshape[2] * pitch)
+        obj.location = tuple(float(c) for c in center)
+        bpy.ops.object.transform_apply(scale=True)
 
-    cam_distance = max_size * 2.5
-    views = [
-        ("front", (center[0], center[1] - cam_distance, center[2] + max_size * 0.3)),
-        ("iso",   (center[0] + cam_distance * 0.7, center[1] - cam_distance * 0.7, center[2] + cam_distance * 0.5)),
+        color = COLORS[type_idx % len(COLORS)]
+        mat = bpy.data.materials.new(name=f"Mat_{type_name}_{i}")
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes["Principled BSDF"]
+        bsdf.inputs["Base Color"].default_value = color
+        bsdf.inputs["Roughness"].default_value = 0.35
+        obj.data.materials.clear()
+        obj.data.materials.append(mat)
+
+    bpy.ops.wm.save_as_mainfile(filepath=str(OUTPUT_BLEND))
+    print(f"  저장 완료! ({time.perf_counter() - t0:.2f}s)")
+
+
+def save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, total_elapsed):
+    from spectral_packer.voxelizer import LogEntry
+
+    container_vol = int(np.prod(tray_size))
+    placed_vol = sum(
+        int(np.prod(meta[p.item_index][1]))
+        for p in result.placements if p.success
+    )
+    fill_rate = placed_vol / container_vol
+
+    origin_str = "[" + ", ".join(f"{v:.4f}" for v in voxel_origin) + "]"
+    entries = voxelizer.log + packer.log + [
+        LogEntry(
+            step="summary",
+            duration_sec=0.0,
+            success=True,
+            notes=(
+                f"placed={result.num_placed}/{len(result.placements)} "
+                f"fill={fill_rate:.1%} "
+                f"tray={tray_size} "
+                f"placed_vol={placed_vol} container_vol={container_vol} "
+                f"voxel_origin={origin_str}"
+            ),
+        ),
+        LogEntry(step="total", duration_sec=total_elapsed, success=True),
     ]
 
-    print(f"\n[렌더링] → {OUTPUT_RENDERS}")
-    for view_name, cam_loc in views:
-        t0 = time.perf_counter()
-        cam_obj.location = cam_loc
-        point_camera_at(cam_obj, center)
-        bpy.context.view_layer.update()
-        output_path = OUTPUT_RENDERS / f"{view_name}.png"
-        scene.render.filepath = str(output_path)
-        bpy.ops.render.render(write_still=True)
-        print(f"  저장: {output_path}  ({time.perf_counter() - t0:.2f}s)")
+    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["step", "duration_sec", "success", "notes"]
+        )
+        writer.writeheader()
+        for e in entries:
+            writer.writerow({
+                "step":         e.step,
+                "duration_sec": f"{e.duration_sec:.3f}",
+                "success":      e.success,
+                "notes":        e.notes,
+            })
+    print(f"[로그] → {OUTPUT_CSV}")
 
 
 def main():
-    total_start = time.perf_counter()
+    t0 = time.perf_counter()
 
     space_path = INPUT_DIR / SPACE_FILE
     if not space_path.exists():
         raise FileNotFoundError(f"공간 파일 없음: {space_path}")
 
-    item_files = collect_item_files()
-    result, voxelizer, packer = run_packing(item_files, space_path)
-    export_blender(result)
+    items, meta = build_items()
+    total_item_vol = sum(int(np.prod(m[1])) for m in meta)
+    print(f"[아이템] {len(items)}개  총 볼륨 {total_item_vol:,} vox")
+    for type_name, shape, count in ITEM_TYPES:
+        vol = int(np.prod(shape))
+        print(f"         {type_name:12s} {str(shape):15s} × {count:2d}개 = {vol*count:,} vox")
 
-    total_elapsed = time.perf_counter() - total_start
-    save_csv(voxelizer, packer, total_elapsed)
+    print("\n[패킹 시작]")
+    result, packer, voxelizer, pitch, voxel_origin = run_packing(items, space_path)
+
+    tray_size = result.tray.shape
+    placed_vol = sum(
+        int(np.prod(meta[p.item_index][1]))
+        for p in result.placements if p.success
+    )
+    fill_rate = placed_vol / int(np.prod(tray_size))
+    print(f"[결과] 배치 성공: {result.num_placed}/{len(items)}개")
+    print(f"[결과] 채움률:    {fill_rate:.1%}")
+    print(f"[결과] tray:      {tray_size}  pitch={pitch:.4f}")
+
+    export_blender(result, meta, pitch, voxel_origin, space_path)
+
+    total_elapsed = time.perf_counter() - t0
+    save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, total_elapsed)
+    print(f"[완료] {total_elapsed:.1f}s")
 
 
 if __name__ == "__main__":
