@@ -15,6 +15,7 @@
 """
 
 import csv
+import json
 import sys
 import time
 from pathlib import Path
@@ -30,6 +31,7 @@ _HERE        = Path(__file__).parent
 INPUT_DIR    = _HERE.parent / "input_meshes"
 OUTPUT_BLEND = _HERE / "results" / "packed_result.blend"
 OUTPUT_CSV   = _HERE / "results" / "log.csv"
+OUTPUT_JSON  = _HERE / "results" / "packed_result.json"
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 SPACE_FILE        = "12281_Container_v2_L2.obj"
@@ -91,12 +93,23 @@ def run_packing(items, space_path):
     )
 
     result = packer.pack_voxels(items, initial_tray=initial_tray)
-    return result, packer, voxelizer, pitch, voxel_origin
+    return result, packer, voxelizer, pitch, voxel_origin, initial_tray
+
+
+# get_orientations(item, 6) 순서와 일치하는 회전 행렬
+# 0:identity, 1:RX, 2:RX², 3:RX³, 4:RY, 5:RY³
+_ROT6 = [
+    np.array([[1, 0, 0], [0,  1,  0], [0,  0,  1]], dtype=float),  # 0: I
+    np.array([[1, 0, 0], [0,  0, -1], [0,  1,  0]], dtype=float),  # 1: RX
+    np.array([[1, 0, 0], [0, -1,  0], [0,  0, -1]], dtype=float),  # 2: RX²
+    np.array([[1, 0, 0], [0,  0,  1], [0, -1,  0]], dtype=float),  # 3: RX³
+    np.array([[0, 0, 1], [0,  1,  0], [-1, 0,  0]], dtype=float),  # 4: RY
+    np.array([[0, 0,-1], [0,  1,  0], [1,  0,  0]], dtype=float),  # 5: RY³
+]
 
 
 def get_rotated_shape(original_shape, orientation_idx):
-    from spectral_packer.rotations import get_rotation_matrix_3x3
-    R = get_rotation_matrix_3x3(orientation_idx)
+    R = _ROT6[orientation_idx]
     rotated = np.abs(R) @ np.array(original_shape, dtype=float)
     return tuple(int(round(v)) for v in rotated)
 
@@ -217,6 +230,39 @@ def save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, total_ela
     print(f"[로그] → {OUTPUT_CSV}")
 
 
+def save_json(result, meta, tray_size, pitch, voxel_origin, initial_tray):
+    data = {
+        "tray_size": [int(v) for v in tray_size],
+        "pitch": float(pitch),
+        "voxel_origin": [float(v) for v in voxel_origin],
+        "item_types": [
+            {"type_name": tn, "shape": [int(v) for v in sh], "count": int(cnt)}
+            for tn, sh, cnt in ITEM_TYPES
+        ],
+        "colors": COLORS,
+        "meta": [
+            {"type_name": tn, "shape": [int(v) for v in sh], "type_idx": int(ti)}
+            for tn, sh, ti in meta
+        ],
+        "placements": [
+            {
+                "item_index": int(p.item_index),
+                "position": [int(v) for v in p.position] if p.position is not None else None,
+                "orientation_index": int(p.orientation_index),
+                "success": bool(p.success),
+                "score": float(p.score) if p.score is not None else None,
+            }
+            for p in result.placements
+        ],
+        # 장애물(벽) 복셀 좌표 — visualize.py에서 컨테이너 내부 형상 확인용
+        "container_walls": np.argwhere(initial_tray == 1).tolist(),
+    }
+    OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    print(f"[JSON] → {OUTPUT_JSON}")
+
+
 def main():
     t0 = time.perf_counter()
 
@@ -232,7 +278,7 @@ def main():
         print(f"         {type_name:12s} {str(shape):15s} × {count:2d}개 = {vol*count:,} vox")
 
     print("\n[패킹 시작]")
-    result, packer, voxelizer, pitch, voxel_origin = run_packing(items, space_path)
+    result, packer, voxelizer, pitch, voxel_origin, initial_tray = run_packing(items, space_path)
 
     tray_size = result.tray.shape
     placed_vol = sum(
@@ -248,6 +294,7 @@ def main():
 
     total_elapsed = time.perf_counter() - t0
     save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, total_elapsed)
+    save_json(result, meta, tray_size, pitch, voxel_origin, initial_tray)
     print(f"[완료] {total_elapsed:.1f}s")
 
 
