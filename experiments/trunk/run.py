@@ -182,9 +182,7 @@ def render_scene():
     max_size = max(max_coords[i] - min_coords[i] for i in range(3))
 
     scene = bpy.context.scene
-    scene.render.engine = 'CYCLES'
-    scene.cycles.device = 'GPU'
-    scene.cycles.samples = 64
+    scene.render.engine = 'BLENDER_EEVEE'
     scene.render.resolution_x = 1280
     scene.render.resolution_y = 960
     scene.render.image_settings.file_format = 'PNG'

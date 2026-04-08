@@ -143,10 +143,17 @@ def render_scene():
     OUTPUT_RENDERS = OUTPUT_BLEND.parent / "renders"
     OUTPUT_RENDERS.mkdir(parents=True, exist_ok=True)
 
+    # 씬 평가 강제 갱신
+    bpy.context.view_layer.update()
+
     mesh_objects = [
         obj for obj in bpy.data.objects
         if obj.type == 'MESH' and not obj.name.startswith('Tray')
     ]
+    print(f"  [렌더링] 메시 오브젝트 수: {len(mesh_objects)}")
+    for obj in mesh_objects:
+        print(f"    - {obj.name}: location={tuple(round(x,2) for x in obj.location)}")
+
     if not mesh_objects:
         print("  [경고] 렌더링할 메시 오브젝트 없음")
         return
@@ -161,34 +168,19 @@ def render_scene():
                 max_coords[i] = max(max_coords[i], world_v[i])
 
     center = [(min_coords[i] + max_coords[i]) / 2 for i in range(3)]
-    max_size = max(max_coords[i] - min_coords[i] for i in range(3))
+    size = [max_coords[i] - min_coords[i] for i in range(3)]
+    max_size = max(size)
+    print(f"  [렌더링] 씬 중심: {[round(x,2) for x in center]}, 크기: {[round(x,2) for x in size]}")
 
     scene = bpy.context.scene
-    scene.render.engine = 'CYCLES'
-    scene.cycles.device = 'GPU'
-    scene.cycles.samples = 64
+    # WORKBENCH: GPU/OpenGL 없이 headless에서 가장 안정적
+    scene.render.engine = 'BLENDER_WORKBENCH'
+    scene.display.shading.light = 'STUDIO'
+    scene.display.shading.color_type = 'MATERIAL'
+    scene.display.shading.show_shadows = True
     scene.render.resolution_x = 1280
     scene.render.resolution_y = 960
     scene.render.image_settings.file_format = 'PNG'
-
-    world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')
-    scene.world = world
-    world.use_nodes = True
-    nodes = world.node_tree.nodes
-    nodes.clear()
-    bg = nodes.new('ShaderNodeBackground')
-    bg.inputs['Color'].default_value = (0.15, 0.15, 0.2, 1)
-    bg.inputs['Strength'].default_value = 0.5
-    out = nodes.new('ShaderNodeOutputWorld')
-    world.node_tree.links.new(bg.outputs['Background'], out.inputs['Surface'])
-
-    for obj in list(bpy.data.objects):
-        if obj.type == 'LIGHT':
-            bpy.data.objects.remove(obj)
-    bpy.ops.object.light_add(type='SUN', location=(50, -30, 80))
-    sun = bpy.context.active_object
-    sun.data.energy = 3
-    sun.rotation_euler = (math.radians(45), math.radians(20), math.radians(30))
 
     colors = [
         (0.9, 0.25, 0.2, 1), (0.2, 0.75, 0.3, 1), (0.2, 0.4, 0.9, 1),
@@ -209,13 +201,17 @@ def render_scene():
         if obj.name.startswith('Tray'):
             obj.hide_render = True
 
-    bpy.ops.object.camera_add()
-    camera = bpy.context.active_object
-    scene.camera = camera
-    camera.data.lens = 50
+    # bpy.ops 대신 bpy.data로 카메라 생성 (headless context 문제 회피)
+    cam_data = bpy.data.cameras.new(name="RenderCam")
+    cam_data.lens = 50
+    cam_data.clip_start = 0.1
+    cam_data.clip_end = cam_distance * 4  # 카메라 거리의 4배로 충분한 클리핑 범위 확보
+    cam_obj = bpy.data.objects.new("RenderCam", cam_data)
+    scene.collection.objects.link(cam_obj)
+    scene.camera = cam_obj
 
     def point_camera_at(cam, target):
-        direction = mathutils.Vector(target) - cam.location
+        direction = mathutils.Vector(target) - mathutils.Vector(cam.location)
         cam.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
 
     cam_distance = max_size * 2.5
@@ -227,8 +223,9 @@ def render_scene():
     print(f"\n[렌더링] → {OUTPUT_RENDERS}")
     for view_name, cam_loc in views:
         t0 = time.perf_counter()
-        camera.location = cam_loc
-        point_camera_at(camera, center)
+        cam_obj.location = cam_loc
+        point_camera_at(cam_obj, center)
+        bpy.context.view_layer.update()
         output_path = OUTPUT_RENDERS / f"{view_name}.png"
         scene.render.filepath = str(output_path)
         bpy.ops.render.render(write_still=True)
