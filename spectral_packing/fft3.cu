@@ -47,6 +47,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <LibSL/LibSL.h>
+#include <algorithm>
 #include "indexOps.h"
 #include "constants.h"
 #include "types.h"
@@ -148,7 +149,7 @@ __global__
 void compute_scores_kernel(const int* collision_metric, const int* proximity_metric,
                            double* scores, int nx, int ny, int nz,
                            int max_x, int max_y, int max_z,
-                           double height_penalty) {
+                           double height_penalty, int item_voxels) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int total = nx * ny * nz;
   if (tid < total) {
@@ -168,9 +169,11 @@ void compute_scores_kernel(const int* collision_metric, const int* proximity_met
       return;
     }
 
-    // Compute penalty-adjusted score
+    // Normalize proximity by item voxel count so score is per-voxel average distance,
+    // making height_penalty scale-independent of item size.
+    double norm = (item_voxels > 0) ? (double)item_voxels : 1.0;
     double qz = (double)k / (double)nz;
-    scores[tid] = (double)proximity_metric[tid] + height_penalty * qz * qz * qz;
+    scores[tid] = (double)proximity_metric[tid] / norm + height_penalty * qz * qz * qz;
   }
 }
 
@@ -182,7 +185,7 @@ void compute_scores_with_interlocking_kernel(
     const int* interlocking_mask,  // 1=interlocking-free, 0=blocked
     double* scores, int nx, int ny, int nz,
     int max_x, int max_y, int max_z,
-    double height_penalty) {
+    double height_penalty, int item_voxels) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int total = nx * ny * nz;
   if (tid < total) {
@@ -208,9 +211,11 @@ void compute_scores_with_interlocking_kernel(
       return;
     }
 
-    // Compute penalty-adjusted score
+    // Normalize proximity by item voxel count so score is per-voxel average distance,
+    // making height_penalty scale-independent of item size.
+    double norm = (item_voxels > 0) ? (double)item_voxels : 1.0;
     double qz = (double)k / (double)nz;
-    scores[tid] = (double)proximity_metric[tid] + height_penalty * qz * qz * qz;
+    scores[tid] = (double)proximity_metric[tid] / norm + height_penalty * qz * qz * qz;
   }
 }
 
@@ -1320,9 +1325,10 @@ public:
 
     {
       SCOPED_TIMER("compute_scores_gpu");
+      int item_voxels = (int)std::count_if(item.data.begin(), item.data.end(), [](int v){ return v != 0; });
       compute_scores_kernel<<<numBlocks, blockSize>>>(
         d_collision_result, d_proximity_result, d_scores,
-        nx, ny, nz, max_x, max_y, max_z, g_height_penalty
+        nx, ny, nz, max_x, max_y, max_z, g_height_penalty, item_voxels
       );
       CUDA_RT_CALL(cudaDeviceSynchronize());
     }
@@ -1408,9 +1414,10 @@ public:
 
     {
       SCOPED_TIMER("compute_scores_interlocking_gpu");
+      int item_voxels = (int)std::count_if(item.data.begin(), item.data.end(), [](int v){ return v != 0; });
       compute_scores_with_interlocking_kernel<<<numBlocks, blockSize>>>(
         d_collision_result, d_proximity_result, d_interlocking_mask,
-        d_scores, nx, ny, nz, max_x, max_y, max_z, g_height_penalty
+        d_scores, nx, ny, nz, max_x, max_y, max_z, g_height_penalty, item_voxels
       );
       CUDA_RT_CALL(cudaDeviceSynchronize());
     }

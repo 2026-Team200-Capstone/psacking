@@ -627,11 +627,13 @@ Index3 fft_search_placement (const VoxelGrid &A, const VoxelGrid &tray, bool &fo
     vector<Index3> non_colliding_loc;
     where3d_flat(collision_metric, non_colliding_loc, 0);
 
+    int item_voxels = (int)std::count_if(padded_a_flat.data.begin(), padded_a_flat.data.end(), [](int v){ return v != 0; });
+    double norm = (item_voxels > 0) ? (double)item_voxels : 1.0;
     double bestVal = INF;
     for (auto id : non_colliding_loc) {
       auto [i, j, k] = id;
       double qz = (k + 0.0) / (L + 0.0);
-      double metric_with_penalty = proximity_metric(i, j, k) + g_height_penalty * pow(qz, 3.0);
+      double metric_with_penalty = proximity_metric(i, j, k) / norm + g_height_penalty * pow(qz, 3.0);
       if (metric_with_penalty < bestVal) {
         found = true;
         bestId = id;
@@ -689,11 +691,13 @@ Index3 fft_search_placement_with_cache(const VoxelGrid &A, const VoxelGrid &tray
     vector<Index3> non_colliding_loc;
     where3d_flat(collision_metric, non_colliding_loc, 0);
 
+    int item_voxels = (int)std::count_if(padded_a_flat.data.begin(), padded_a_flat.data.end(), [](int v){ return v != 0; });
+    double norm = (item_voxels > 0) ? (double)item_voxels : 1.0;
     double bestVal = INF;
     for (auto id : non_colliding_loc) {
       auto [i, j, k] = id;
       double qz = (k + 0.0) / (L + 0.0);
-      double metric_with_penalty = proximity_metric(i, j, k) + g_height_penalty * pow(qz, 3.0);
+      double metric_with_penalty = proximity_metric(i, j, k) / norm + g_height_penalty * pow(qz, 3.0);
       if (metric_with_penalty < bestVal) {
         found = true;
         bestId = id;
@@ -750,11 +754,13 @@ Index3 fft_search_placement_with_cache_flat(
 
   {
     SCOPED_TIMER("score_loop");
+    int item_voxels = (int)std::count_if(item_flat.data.begin(), item_flat.data.end(), [](int v){ return v != 0; });
+    double norm = (item_voxels > 0) ? (double)item_voxels : 1.0;
     double bestVal = INF;
     for (auto id : non_colliding_loc) {
       auto [i, j, k] = id;
       double qz = (k + 0.0) / (L + 0.0);
-      double metric_with_penalty = proximity_metric(i, j, k) + g_height_penalty * pow(qz, 3.0);
+      double metric_with_penalty = proximity_metric(i, j, k) / norm + g_height_penalty * pow(qz, 3.0);
       if (metric_with_penalty < bestVal) {
         found = true;
         bestId = id;
