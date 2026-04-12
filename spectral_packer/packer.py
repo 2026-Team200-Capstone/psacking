@@ -233,7 +233,7 @@ class BinPacker:
         self,
         tray_size: Tuple[int, int, int],
         voxel_resolution: int = 128,
-        height_penalty: float = 4.0,
+        height_penalty: float = 50.0,
         num_orientations: int = 1,
         interlocking_free: bool = False,
         continuous_refinement: bool = False,

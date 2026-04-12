@@ -3,7 +3,7 @@
 
 #define USE_PARALLEL_FFT3D 1
 #define VOXEL_RESOLUTION  128
-#define P 4.0
+#define P 50.0
 #define VOXEL_FILL_INSIDE 1
 #define VOXEL_ROBUST_FILL 0
 #define FP_POW    16

@@ -37,7 +37,7 @@ OUTPUT_JSON  = _HERE / "results" / "packed_result.json"
 SPACE_FILE        = "12281_Container_v2_L2.obj"
 SPACE_RESOLUTION  = 128
 NUM_ORIENTATIONS  = 6
-HEIGHT_PENALTY    = 4.0
+HEIGHT_PENALTY    = 50.0
 
 # 아이템 정의: (이름, 복셀 크기 (x,y,z), 개수)
 # pitch는 컨테이너 복셀화 후 결정 → 아이템 크기도 pitch 기준
