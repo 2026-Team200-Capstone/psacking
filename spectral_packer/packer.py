@@ -480,8 +480,11 @@ class BinPacker:
             orientations = get_orientations(item, self.num_orientations)
 
             # Pre-compute distance field ONCE per item (not per orientation)
+            # Use only placed items (tray > id_offset) — exclude walls (= id_offset)
+            # so that proximity scoring attracts items to each other, not to walls.
             if self.num_orientations > 1 or self.interlocking_free:
-                tray_distance = self._compute_distance_field(tray)
+                item_only_tray = (tray > id_offset).astype(np.int32)
+                tray_distance = self._compute_distance_field(item_only_tray)
 
             if self.interlocking_free:
                 # Use batch interlocking-free search (Section 4.3)
@@ -533,7 +536,8 @@ class BinPacker:
                 if self.continuous_refinement:
                     # Need distance field (compute if not already available)
                     if not (self.num_orientations > 1 or self.interlocking_free):
-                        tray_distance = self._compute_distance_field(tray)
+                        item_only_tray = (tray > id_offset).astype(np.int32)
+                        tray_distance = self._compute_distance_field(item_only_tray)
                     refined_pos = self._refine_placement(
                         best_rotated_item, tray_distance, best_position
                     )
