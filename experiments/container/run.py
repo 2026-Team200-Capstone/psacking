@@ -34,21 +34,21 @@ OUTPUT_CSV   = _HERE / "results" / "log.csv"
 OUTPUT_JSON  = _HERE / "results" / "packed_result.json"
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
-SPACE_FILE        = "12281_Container_v2_L2.obj"
+SPACE_FILE        = "coffee_cup_obj.obj"
 SPACE_RESOLUTION  = 128
 NUM_ORIENTATIONS  = 6
 HEIGHT_PENALTY    = 50.0
 
 # 아이템 정의: (이름, 복셀 크기 (x,y,z), 개수)
 # pitch는 컨테이너 복셀화 후 결정 → 아이템 크기도 pitch 기준
-# 컨테이너가 약 128×54×53 복셀이므로 아이템은 그에 맞게 설정
+# 커피컵 내부가 약 90×90×127 복셀이므로 아이템은 그에 맞게 설정
 ITEM_TYPES = [
-    ("large_box",  (20, 15, 10),  4),
-    ("medium_box", (12, 10,  8),  8),
-    ("flat_box",   (18, 12,  3),  8),
-    ("tall_box",   ( 6,  6, 15),  8),
-    ("small_box",  ( 8,  6,  4), 15),
-    ("tiny_box",   ( 5,  4,  3), 20),
+    ("large_box",  (20, 15, 10),  2),
+    ("medium_box", (12, 10,  8),  4),
+    ("flat_box",   (18, 12,  3),  4),
+    ("tall_box",   ( 6,  6, 15),  4),
+    ("small_box",  ( 8,  6,  4),  6),
+    ("tiny_box",   ( 5,  4,  3),  8),
 ]
 
 # 아이템 타입별 색상 (RGBA)
