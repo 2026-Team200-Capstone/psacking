@@ -42,13 +42,14 @@ OUTPUT_DIR      = None   # 결과 저장 경로 (None → results/<space_stem>/ 
 # 아이템 정의 (컨테이너 각 축 tray 크기에 대한 비율)
 # (이름, (x비율, y비율, z비율), 개수)
 # → 복셀화 후 실제 tray_size에 곱해 자동으로 절대 복셀 크기로 변환
+# 총 이론 볼륨 ≈ 395,508 vox → 이론 채움률 73% (실제: 일부 배치 실패 예상)
 ITEM_TYPES_RELATIVE = [
-    ("large_box",  (0.22, 0.12, 0.11),  2),
-    ("medium_box", (0.13, 0.08, 0.09),  4),
-    ("flat_box",   (0.20, 0.09, 0.03),  4),
-    ("tall_box",   (0.07, 0.05, 0.16),  4),
-    ("small_box",  (0.09, 0.05, 0.04),  6),
-    ("tiny_box",   (0.05, 0.03, 0.03),  8),
+    ("large_box",  (0.60, 0.30, 0.28),  3),
+    ("medium_box", (0.36, 0.22, 0.26),  4),
+    ("flat_box",   (0.55, 0.25, 0.08),  5),
+    ("tall_box",   (0.20, 0.14, 0.44),  4),
+    ("small_box",  (0.25, 0.14, 0.11),  6),
+    ("tiny_box",   (0.14, 0.09, 0.09),  8),
 ]
 
 COLORS = [
@@ -393,6 +394,15 @@ def main():
     print(f"[결과] 배치 성공: {result.num_placed}/{len(items)}개")
     print(f"[결과] 채움률:    {fill_rate:.1%}  (내부공간 {free_vol:,} vox 기준)")
     print(f"[결과] tray:      {tray_size}  pitch={pitch:.4f}")
+
+    failed = [p for p in result.placements if not p.success]
+    if failed:
+        print(f"\n[실패] 배치 실패 아이템 {len(failed)}개:")
+        from collections import Counter
+        failed_types = Counter(meta[p.item_index][0] for p in failed)
+        for type_name, count in failed_types.most_common():
+            shape = next(m[1] for m in meta if m[0] == type_name)
+            print(f"  - {type_name} {shape}  × {count}개")
 
     export_blender(result, meta, pitch, voxel_origin, space_path, out_dir, COLORS,
                    NUM_ORIENTATIONS)
