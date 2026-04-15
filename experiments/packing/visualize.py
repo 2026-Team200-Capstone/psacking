@@ -297,9 +297,9 @@ def visualize(json_path: Path):
         traces.append(_box_mesh(
             *pos, *rshape,
             color=color, name=type_name,
-            opacity=0.75, show_legend=first_of_type,
+            opacity=0.95, show_legend=first_of_type,
         ))
-        traces.append(_wireframe(*pos, *rshape, color=color, name=type_name))
+        traces.append(_wireframe(*pos, *rshape, color='#222222', name=type_name, width=2))
 
     # ── 배치 실패 아이템 렌더링 (고유 색상, tray 외부에 표시) ─────────────────
     # 타입별로 그룹화: 같은 타입은 z축으로 쌓고, 타입마다 x 오프셋 부여
