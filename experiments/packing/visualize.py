@@ -302,25 +302,42 @@ def visualize(json_path: Path):
         traces.append(_wireframe(*pos, *rshape, color=color, name=type_name))
 
     # ── 배치 실패 아이템 렌더링 (고유 색상, tray 외부에 표시) ─────────────────
-    for fail_idx, p in enumerate(failed):
-        m         = meta[p["item_index"]]
-        type_name = m["type_name"]
-        type_idx  = m["type_idx"]
-        shape     = tuple(m["shape"])
-        # 실패 아이템은 위치 정보가 없으므로 tray 우측 상단 외부에 나란히 표시
-        fx = tray_size[0] + 2 + (shape[0] + 1) * (fail_idx % 5)
-        fy = (shape[1] + 1) * (fail_idx // 5)
-        fz = 0
-        color          = colors[type_idx % len(colors)]
-        label          = f"[실패] {type_name}"
-        first_of_type  = label not in seen_types
-        seen_types.add(label)
-        traces.append(_box_mesh(
-            fx, fy, fz, *shape,
-            color=color, name=label,
-            opacity=0.40, show_legend=first_of_type,
-        ))
-        traces.append(_wireframe(fx, fy, fz, *shape, color=color, name=label))
+    # 타입별로 그룹화: 같은 타입은 z축으로 쌓고, 타입마다 x 오프셋 부여
+    from collections import defaultdict as _defaultdict
+
+    _GAP        = 2
+    _base_x     = tray_size[0] + _GAP
+    _type_groups = _defaultdict(list)
+    for p in failed:
+        m = meta[p["item_index"]]
+        _type_groups[m["type_name"]].append((p, m))
+
+    _cum_x = _base_x
+    for _type_name in sorted(_type_groups):
+        _group       = _type_groups[_type_name]
+        _group_width = max(tuple(m["shape"])[0] for _, m in _group)
+        _cum_z       = 0
+
+        for p, m in _group:
+            type_name = m["type_name"]
+            type_idx  = m["type_idx"]
+            shape     = tuple(m["shape"])
+
+            fx, fy, fz = _cum_x, 0, _cum_z
+            _cum_z += shape[2] + _GAP
+
+            color         = colors[type_idx % len(colors)]
+            label         = f"[실패] {type_name}"
+            first_of_type = label not in seen_types
+            seen_types.add(label)
+            traces.append(_box_mesh(
+                fx, fy, fz, *shape,
+                color=color, name=label,
+                opacity=0.40, show_legend=first_of_type,
+            ))
+            traces.append(_wireframe(fx, fy, fz, *shape, color=color, name=label))
+
+        _cum_x += _group_width + _GAP
 
     # ── 채움률 계산 ───────────────────────────────────────────────────────────
     placed_vol = sum(int(np.prod(meta[p["item_index"]]["shape"])) for p in placed)
