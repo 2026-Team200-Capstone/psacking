@@ -301,26 +301,26 @@ def visualize(json_path: Path):
         ))
         traces.append(_wireframe(*pos, *rshape, color=color, name=type_name))
 
-    # ── 배치 실패 아이템 렌더링 (반투명 빨간색) ──────────────────────────────
-    FAIL_COLOR  = "#cc2222"
-    fail_legend_shown = False
-    for p in failed:
+    # ── 배치 실패 아이템 렌더링 (고유 색상, tray 외부에 표시) ─────────────────
+    for fail_idx, p in enumerate(failed):
         m         = meta[p["item_index"]]
         type_name = m["type_name"]
+        type_idx  = m["type_idx"]
         shape     = tuple(m["shape"])
         # 실패 아이템은 위치 정보가 없으므로 tray 우측 상단 외부에 나란히 표시
-        fail_idx  = failed.index(p)
         fx = tray_size[0] + 2 + (shape[0] + 1) * (fail_idx % 5)
         fy = (shape[1] + 1) * (fail_idx // 5)
         fz = 0
-        label = f"[실패] {type_name}"
+        color          = colors[type_idx % len(colors)]
+        label          = f"[실패] {type_name}"
+        first_of_type  = label not in seen_types
+        seen_types.add(label)
         traces.append(_box_mesh(
             fx, fy, fz, *shape,
-            color=FAIL_COLOR, name=label,
-            opacity=0.40, show_legend=not fail_legend_shown,
+            color=color, name=label,
+            opacity=0.40, show_legend=first_of_type,
         ))
-        traces.append(_wireframe(fx, fy, fz, *shape, color=FAIL_COLOR, name=label))
-        fail_legend_shown = True
+        traces.append(_wireframe(fx, fy, fz, *shape, color=color, name=label))
 
     # ── 채움률 계산 ───────────────────────────────────────────────────────────
     placed_vol = sum(int(np.prod(meta[p["item_index"]]["shape"])) for p in placed)
