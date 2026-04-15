@@ -33,7 +33,7 @@ INPUT_DIR = _HERE.parent / "input_meshes"
 # ★ 설정 — 여기만 바꾸면 됩니다
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SPACE_FILE      = INPUT_DIR / "coffee_cup_obj.obj"  # 패킹 공간 메시 (.obj/.stl/.ply 등)
+SPACE_FILE      = INPUT_DIR / "abstracted_trunk.ply"  # 패킹 공간 메시 (.obj/.stl/.ply 등)
 RESOLUTION      = 128    # 복셀화 해상도 (가장 긴 축 기준 최대 복셀 수)
 NUM_ORIENTATIONS = 6     # 아이템 방향 수 (1 / 4 / 6 / 24)
 HEIGHT_PENALTY  = 50.0   # 높이 페널티 (클수록 아이템이 낮게 쌓임)
