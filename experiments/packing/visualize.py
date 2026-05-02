@@ -11,11 +11,16 @@ spectral_packer 없이 plotly + numpy만 있으면 실행 가능합니다.
     python experiments/packing/visualize.py results/coffee_cup_obj/  # 결과 디렉토리 지정
     python experiments/packing/visualize.py results/coffee_cup_obj/packed_result.json
     python experiments/packing/visualize.py coffee_cup_obj           # space 이름으로 탐색
+    python experiments/packing/visualize.py http://server:8000/jobs/<job_id>/result
+    python experiments/packing/visualize.py --server http://server:8000 --job <job_id>
 """
 
+import argparse
 import json
-import sys
 from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import numpy as np
 
@@ -137,6 +142,44 @@ def find_json(arg=None):
     return candidates[0]
 
 
+def _is_url(value: str | None) -> bool:
+    return bool(value and (value.startswith("http://") or value.startswith("https://")))
+
+
+def _fetch_json(url: str, timeout: float = 30.0) -> Any:
+    req = Request(url, headers={"Accept": "application/json"})
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            charset = response.headers.get_content_charset("utf-8")
+            return json.loads(response.read().decode(charset))
+    except HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code} 응답: {url}\n{detail}") from e
+    except URLError as e:
+        raise RuntimeError(f"URL 조회 실패: {url}\n{e}") from e
+
+
+def load_result(source: str | None = None, server: str | None = None, job: str | None = None):
+    if server or job:
+        if not (server and job):
+            raise ValueError("--server와 --job은 함께 지정해야 합니다.")
+        url = f"{server.rstrip('/')}/jobs/{job}/result"
+        return _fetch_json(url), url
+
+    if _is_url(source):
+        return _fetch_json(str(source)), str(source)
+
+    json_path = find_json(source)
+    with open(json_path, encoding="utf-8") as f:
+        return json.load(f), str(json_path)
+
+
+def _fallback_space_name(source_name: str | None) -> str:
+    if source_name and not _is_url(source_name):
+        return Path(source_name).parent.name
+    return "remote_result"
+
+
 # ── Plotly 트레이스 헬퍼 ──────────────────────────────────────────────────────
 
 def _to_hex(c):
@@ -239,11 +282,8 @@ def _container_walls_trace(walls):
 
 # ── 메인 시각화 ───────────────────────────────────────────────────────────────
 
-def visualize(json_path: Path):
+def visualize_data(data: dict[str, Any], source_name: str | None = None):
     import plotly.graph_objects as go
-
-    with open(json_path, encoding="utf-8") as f:
-        data = json.load(f)
 
     tray_size       = data["tray_size"]
     meta            = data["meta"]
@@ -252,7 +292,7 @@ def visualize(json_path: Path):
     pitch           = data.get("pitch", 1.0)
     voxel_origin    = np.array(data.get("voxel_origin", [0.0, 0.0, 0.0]))
     num_orientations = data.get("num_orientations", 6)
-    space_name      = data.get("space_name", json_path.parent.name)
+    space_name      = data.get("space_name", _fallback_space_name(source_name))
 
     traces = []
     seen_types = set()
@@ -411,11 +451,25 @@ def visualize(json_path: Path):
         print(f"[검증] 겹치는 쌍: {overlap_count}개 ⚠")
 
 
+def visualize(json_path: Path):
+    data, source_name = load_result(str(json_path))
+    visualize_data(data, source_name)
+
+
 def main():
-    arg       = sys.argv[1] if len(sys.argv) > 1 else None
-    json_path = find_json(arg)
-    print(f"[읽기] {json_path}")
-    visualize(json_path)
+    parser = argparse.ArgumentParser(description="패킹 결과 JSON을 Plotly로 시각화합니다.")
+    parser.add_argument(
+        "source",
+        nargs="?",
+        help="로컬 JSON/결과 디렉토리/space 이름 또는 http(s) 결과 URL",
+    )
+    parser.add_argument("--server", help="Packing API 서버 주소. 예: http://server:8000")
+    parser.add_argument("--job", help="조회할 job id")
+    args = parser.parse_args()
+
+    data, source_name = load_result(args.source, args.server, args.job)
+    print(f"[읽기] {source_name}")
+    visualize_data(data, source_name)
 
 
 if __name__ == "__main__":
