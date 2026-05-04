@@ -42,12 +42,12 @@ OUTPUT_DIR      = None   # 결과 저장 경로 (None → results/<space_stem>/ 
 
 # 아이템 정의: INPUT_DIR 아래 test_box*.stl 파일을 모두 배치 대상으로 사용합니다.
 # 각 타입은 최소 1개 이상 포함하고, 총 아이템 점유 볼륨이 내부공간의
-# TARGET_ITEM_VOLUME_RATIO 배가 될 때까지 랜덤 타입을 골라 개수를 늘립니다.
+# TARGET_ITEM_VOLUME_RATIO 배에 도달할 때까지 랜덤 타입을 골라 개수를 늘립니다.
 ITEM_MESH_PATTERN = "test_box*.stl"
 ITEM_COUNT_RANDOM_SEED = None  # None이면 매 실행마다 다른 랜덤 개수
 MIN_ITEM_COUNT_PER_TYPE = 1
 INITIAL_ITEM_COUNT_RANGE = (1, 4)
-TARGET_ITEM_VOLUME_RATIO = 1.25  # 100% 초과로 넣어 일부 아이템은 배치 실패하도록 함
+TARGET_ITEM_VOLUME_RATIO = 0.45  # 기존 1.25는 과투입이라 실패 물품이 많이 생김
 
 COLORS = [
     (0.90, 0.25, 0.20, 1.0),
@@ -90,8 +90,8 @@ def build_mesh_items(voxelizer, item_mesh_types, pitch, free_volume, target_rati
     item_types tuple:
       (type_name, shape, count, mesh_path, voxel_count, voxel_info)
     """
-    if target_ratio <= 1.0:
-        raise ValueError("TARGET_ITEM_VOLUME_RATIO는 1.0보다 커야 배치 실패가 보장됩니다.")
+    if target_ratio <= 0:
+        raise ValueError("TARGET_ITEM_VOLUME_RATIO는 0보다 커야 합니다.")
 
     min_count_per_type = max(1, int(min_count_per_type))
     initial_low, initial_high = (int(initial_count_range[0]), int(initial_count_range[1]))
