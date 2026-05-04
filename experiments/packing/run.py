@@ -40,6 +40,23 @@ NUM_ORIENTATIONS = 6     # 아이템 방향 수 (1 / 4 / 6 / 24)
 HEIGHT_PENALTY  = 50.0   # 높이 페널티 (클수록 아이템이 낮게 쌓임)
 OUTPUT_DIR      = None   # 결과 저장 경로 (None → results/<space_stem>/ 자동 생성)
 
+# 공간 메시 좌표계 보정 변환 (4×4 행렬, world ← world)
+# - 본 파이프라인은 Z축을 "위" 방향으로 가정하지만, abstracted_trunk.{stl,ply}
+#   원본은 Y-up 좌표계(바닥 평면 = y_min)로 저장되어 있어 그대로 voxelize 하면
+#   바닥이 기울어 보이고 height_penalty 가 의도와 다른 축으로 적용됩니다.
+# - 아래 행렬은 X축 +90° 회전 ((x,y,z) → (x,-z,y)) 으로 Y-up → Z-up 변환합니다.
+# - 회전이 필요 없는 메시(이미 Z-up)에는 None 또는 np.eye(4) 를 넣으세요.
+# - 변환은 voxelize 직전 메모리상에서만 적용되며, 원본 파일은 변경되지 않습니다.
+SPACE_TRANSFORM = np.array(
+    [
+        [1.0, 0.0,  0.0, 0.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 1.0,  0.0, 0.0],
+        [0.0, 0.0,  0.0, 1.0],
+    ],
+    dtype=float,
+)
+
 # 아이템 정의: INPUT_DIR 아래 test_box*.stl 파일을 모두 배치 대상으로 사용합니다.
 # 각 타입은 최소 1개 이상 포함하고, 총 아이템 점유 볼륨이 내부공간의
 # TARGET_ITEM_VOLUME_RATIO 배에 도달할 때까지 랜덤 타입을 골라 개수를 늘립니다.
@@ -163,13 +180,87 @@ def build_mesh_items(voxelizer, item_mesh_types, pitch, free_volume, target_rati
     return items, meta, item_types
 
 
-def voxelize_space(space_path, resolution):
-    """메시를 복셀화하고 (voxelizer, initial_tray, pitch, tray_size, voxel_origin) 반환."""
+def voxelize_space(space_path, resolution, transform=None):
+    """메시를 복셀화하고 (voxelizer, initial_tray, pitch, tray_size, voxel_origin) 반환.
+
+    transform 이 4×4 행렬이고 항등행렬이 아닐 경우, 메시를 메모리상에서 변환한 뒤
+    voxelize 합니다 (원본 파일은 수정되지 않음). 변환은 공간 메시에만 적용되며,
+    아이템 메시는 항상 원래 좌표계 그대로 voxelize 됩니다.
+    """
     from spectral_packer.voxelizer import Voxelizer
 
     voxelizer = Voxelizer(resolution=resolution)
-    initial_tray, pitch, tray_size, voxel_origin = voxelizer.voxelize_space(space_path)
+
+    if transform is None or np.allclose(np.asarray(transform), np.eye(4)):
+        initial_tray, pitch, tray_size, voxel_origin = voxelizer.voxelize_space(space_path)
+    else:
+        initial_tray, pitch, tray_size, voxel_origin = _voxelize_space_with_transform(
+            voxelizer, space_path, np.asarray(transform, dtype=float),
+        )
     return voxelizer, initial_tray, pitch, tray_size, voxel_origin
+
+
+def _voxelize_space_with_transform(voxelizer, space_path, transform):
+    """공간 메시에 transform 을 적용한 뒤 voxelize_space 와 동일한 결과를 반환합니다.
+
+    voxelizer.voxelize_space 의 로직을 그대로 따라가되, trimesh.Trimesh 에
+    apply_transform(transform) 을 한 번 끼워 넣은 형태입니다. voxelizer.log 에도
+    동일한 step 이름으로 기록을 남깁니다.
+    """
+    import time as _time
+
+    import trimesh
+    from scipy.ndimage import binary_erosion
+
+    from spectral_packer.mesh_io import load_mesh
+    from spectral_packer.voxelizer import LogEntry
+
+    t0 = _time.perf_counter()
+
+    vertices, faces = load_mesh(space_path, validate=True, repair=True)
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+    mesh.apply_transform(transform)
+
+    max_extent = float(mesh.extents.max())
+    pitch = (
+        voxelizer.pitch
+        if voxelizer.pitch is not None
+        else max_extent / (voxelizer.resolution - 1)
+    )
+
+    try:
+        voxelgrid = mesh.voxelized(pitch=pitch).fill()
+    except Exception as e:
+        voxelgrid = mesh.voxelized(pitch=pitch)
+        voxelizer.log.append(LogEntry(
+            step="space_voxelization_fill_fallback",
+            duration_sec=0.0, success=False, notes=str(e),
+        ))
+
+    filled = voxelgrid.matrix.astype("int32")
+    if hasattr(voxelgrid, "origin"):
+        voxel_origin = np.array(voxelgrid.origin, dtype=np.float64)
+    else:
+        voxel_origin = np.array(voxelgrid.transform[:3, 3], dtype=np.float64)
+
+    free_mask = filled.astype(bool)
+    free_mask_eroded = binary_erosion(free_mask, iterations=1)
+    filled_eroded = free_mask_eroded.astype("int32")
+    initial_tray = (1 - filled_eroded).astype("int32")
+    tray_size = filled.shape
+
+    elapsed = _time.perf_counter() - t0
+    voxelizer.log.append(LogEntry(
+        step="space_voxelization",
+        duration_sec=elapsed,
+        success=True,
+        notes=(
+            f"tray={tray_size} pitch={pitch:.4f} "
+            f"free={filled.mean():.1%} free_after_erosion={filled_eroded.mean():.1%} "
+            f"transform=applied"
+        ),
+    ))
+    return initial_tray, pitch, tray_size, voxel_origin
 
 
 def pack_items(items, initial_tray, tray_size, pitch, resolution, num_orientations,
@@ -301,7 +392,7 @@ def _import_blender_mesh(bpy, mesh_path, name):
 
 
 def export_blender(result, meta, pitch, voxel_origin, space_path, out_dir, colors,
-                   num_orientations):
+                   num_orientations, space_transform=None):
     try:
         import bpy
         import mathutils
@@ -326,6 +417,13 @@ def export_blender(result, meta, pitch, voxel_origin, space_path, out_dir, color
     except Exception as e:
         print(f"  [경고] 컨테이너 메시 임포트 실패: {e}")
         container_objs = []
+
+    if space_transform is not None and not np.allclose(
+        np.asarray(space_transform), np.eye(4)
+    ):
+        _bpy_xform = mathutils.Matrix(np.asarray(space_transform, dtype=float).tolist())
+        for obj in container_objs:
+            obj.matrix_world = _bpy_xform @ obj.matrix_world
 
     for obj in container_objs:
         obj.name = "Container"
@@ -408,7 +506,8 @@ def save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, initial_t
 
 def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_tray,
               space_path, num_orientations, out_dir, item_mesh_pattern=None,
-              item_count_seed=None, target_item_volume_ratio=None):
+              item_count_seed=None, target_item_volume_ratio=None,
+              space_transform=None):
     free_volume = int((initial_tray == 0).sum())
     data = {
         "space_name": space_path.stem,
@@ -457,17 +556,32 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
         ],
     }
 
-    # 컨테이너 메시 형상 저장 — visualize.py에서 실제 3D 형태로 렌더링
+    # 컨테이너 메시 형상 저장 — visualize.py에서 실제 3D 형태로 렌더링.
+    # SPACE_TRANSFORM 이 적용되었다면 voxel 좌표계와 일치하도록 같은 변환을 정점에도 적용.
     try:
         import trimesh as _trimesh
         _mesh = _trimesh.load(str(space_path), force="mesh")
         if isinstance(_mesh, _trimesh.Trimesh):
+            if space_transform is not None and not np.allclose(
+                np.asarray(space_transform), np.eye(4)
+            ):
+                _mesh = _mesh.copy()
+                _mesh.apply_transform(np.asarray(space_transform, dtype=float))
+                _xform_note = " (transform applied)"
+            else:
+                _xform_note = ""
             data["container_mesh_vertices"] = [
                 [round(float(v), 6) for v in vert]
                 for vert in _mesh.vertices
             ]
             data["container_mesh_faces"] = _mesh.faces.tolist()
-            print(f"[JSON] 컨테이너 메시: {len(_mesh.vertices)}개 정점, {len(_mesh.faces)}개 삼각형")
+            data["space_transform"] = (
+                np.asarray(space_transform, dtype=float).tolist()
+                if space_transform is not None
+                else None
+            )
+            print(f"[JSON] 컨테이너 메시: {len(_mesh.vertices)}개 정점, "
+                  f"{len(_mesh.faces)}개 삼각형{_xform_note}")
         else:
             print("[경고] 컨테이너 메시가 단일 Trimesh가 아님 → 메시 저장 건너뜀")
     except Exception as _e:
@@ -523,8 +637,10 @@ def main():
 
     # ── 1단계: 복셀화 → tray_size 확정 ────────────────────────────────────
     print("\n[복셀화 중...]")
+    if SPACE_TRANSFORM is not None and not np.allclose(SPACE_TRANSFORM, np.eye(4)):
+        print("[좌표계] SPACE_TRANSFORM 적용 (Y-up → Z-up 등 보정)")
     voxelizer, initial_tray, pitch, tray_size, voxel_origin = voxelize_space(
-        space_path, RESOLUTION,
+        space_path, RESOLUTION, transform=SPACE_TRANSFORM,
     )
 
     # ── 2단계: 같은 pitch로 STL 아이템 복셀화 및 개수 자동 증량 ─────────────
@@ -575,7 +691,7 @@ def main():
             print(f"  - {type_name} {shape}  × {count}개")
 
     export_blender(result, meta, pitch, voxel_origin, space_path, out_dir, COLORS,
-                   NUM_ORIENTATIONS)
+                   NUM_ORIENTATIONS, space_transform=SPACE_TRANSFORM)
 
     total_elapsed = time.perf_counter() - t0
     save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, initial_tray,
@@ -584,7 +700,8 @@ def main():
               space_path, NUM_ORIENTATIONS, out_dir,
               item_mesh_pattern=ITEM_MESH_PATTERN,
               item_count_seed=item_count_seed,
-              target_item_volume_ratio=TARGET_ITEM_VOLUME_RATIO)
+              target_item_volume_ratio=TARGET_ITEM_VOLUME_RATIO,
+              space_transform=SPACE_TRANSFORM)
 
     json_path = out_dir / "packed_result.json"
     print(f"\n[완료] {total_elapsed:.1f}s")
