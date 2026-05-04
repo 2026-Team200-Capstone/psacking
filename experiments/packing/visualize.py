@@ -72,8 +72,7 @@ def _build_rot_matrices():
 _ROT6, _ROT24 = _build_rot_matrices()
 
 
-def get_rotated_shape(shape, orientation_idx, num_orientations=6):
-    """회전 인덱스에 따라 아이템의 축 정렬 바운딩박스 크기를 반환합니다."""
+def get_rotation_matrix(orientation_idx, num_orientations=6):
     rots = _ROT6 if num_orientations <= 6 else _ROT24
     if orientation_idx >= len(rots):
         raise ValueError(
@@ -81,7 +80,12 @@ def get_rotated_shape(shape, orientation_idx, num_orientations=6):
             f"(num_orientations={num_orientations}). "
             f"JSON이 다른 설정으로 생성되었을 수 있습니다."
         )
-    R = rots[orientation_idx]
+    return rots[orientation_idx]
+
+
+def get_rotated_shape(shape, orientation_idx, num_orientations=6):
+    """회전 인덱스에 따라 아이템의 축 정렬 바운딩박스 크기를 반환합니다."""
+    R = get_rotation_matrix(orientation_idx, num_orientations)
     # abs(R) @ shape: 90° 축 회전 후 바운딩박스 크기 계산
     rotated = np.abs(R) @ np.array(shape, dtype=float)
     return tuple(int(round(v)) for v in rotated)
@@ -280,6 +284,59 @@ def _container_walls_trace(walls):
     )
 
 
+def _item_mesh_trace(verts_vox, faces, color, name, opacity, show_legend):
+    import plotly.graph_objects as go
+
+    v = np.asarray(verts_vox, dtype=float)
+    f = np.asarray(faces, dtype=int)
+    return go.Mesh3d(
+        x=v[:, 0], y=v[:, 1], z=v[:, 2],
+        i=f[:, 0], j=f[:, 1], k=f[:, 2],
+        color=color,
+        opacity=opacity,
+        flatshading=True,
+        lighting=dict(
+            ambient=0.55,
+            diffuse=0.85,
+            specular=0.25,
+            roughness=0.45,
+            fresnel=0.15,
+        ),
+        name=name,
+        legendgroup=name,
+        showlegend=show_legend,
+        hovertemplate=f"{name}<extra></extra>",
+    )
+
+
+def _item_mesh_vertices_vox(mesh_data, position, orientation_idx, voxel_origin,
+                            pitch, num_orientations):
+    vertices = np.array(mesh_data["vertices"], dtype=float)
+    bounds_min = np.array(
+        mesh_data.get("bounds_min", vertices.min(axis=0)), dtype=float
+    )
+    bounds_max = np.array(
+        mesh_data.get("bounds_max", vertices.max(axis=0)), dtype=float
+    )
+
+    R = get_rotation_matrix(orientation_idx, num_orientations)
+    mesh_center = (bounds_min + bounds_max) / 2.0
+    mesh_half_extents = (bounds_max - bounds_min) / 2.0
+    rotated_half_extents = np.abs(R) @ mesh_half_extents
+
+    final_center = (
+        np.array(voxel_origin, dtype=float)
+        + np.array(position, dtype=float) * pitch
+        + rotated_half_extents
+    )
+    transformed_world = (R @ vertices.T).T + (final_center - R @ mesh_center)
+    return (transformed_world - voxel_origin) / pitch
+
+
+def _meta_volume(meta_entry):
+    return int(meta_entry.get("voxel_count", int(np.prod(meta_entry["shape"]))))
+
+
 # ── 메인 시각화 ───────────────────────────────────────────────────────────────
 
 def visualize_data(data: dict[str, Any], source_name: str | None = None):
@@ -293,6 +350,7 @@ def visualize_data(data: dict[str, Any], source_name: str | None = None):
     voxel_origin    = np.array(data.get("voxel_origin", [0.0, 0.0, 0.0]))
     num_orientations = data.get("num_orientations", 6)
     space_name      = data.get("space_name", _fallback_space_name(source_name))
+    item_meshes     = data.get("item_meshes", {})
 
     traces = []
     seen_types = set()
@@ -334,12 +392,27 @@ def visualize_data(data: dict[str, Any], source_name: str | None = None):
         first_of_type  = type_name not in seen_types
         seen_types.add(type_name)
 
-        traces.append(_box_mesh(
-            *pos, *rshape,
-            color=color, name=type_name,
-            opacity=0.95, show_legend=first_of_type,
-        ))
-        traces.append(_wireframe(*pos, *rshape, color='#222222', name=type_name, width=2))
+        mesh_data = item_meshes.get(type_name)
+        if mesh_data:
+            verts_vox = _item_mesh_vertices_vox(
+                mesh_data, pos, p["orientation_index"],
+                voxel_origin, pitch, num_orientations,
+            )
+            traces.append(_item_mesh_trace(
+                verts_vox,
+                mesh_data["faces"],
+                color=color,
+                name=type_name,
+                opacity=0.95,
+                show_legend=first_of_type,
+            ))
+        else:
+            traces.append(_box_mesh(
+                *pos, *rshape,
+                color=color, name=type_name,
+                opacity=0.95, show_legend=first_of_type,
+            ))
+            traces.append(_wireframe(*pos, *rshape, color='#222222', name=type_name, width=2))
 
     # ── 배치 실패 아이템 렌더링 (고유 색상, tray 외부에 표시) ─────────────────
     # 타입별로 그룹화: 같은 타입은 z축으로 쌓고, 타입마다 x 오프셋 부여
@@ -380,7 +453,7 @@ def visualize_data(data: dict[str, Any], source_name: str | None = None):
         _cum_x += _group_width + _GAP
 
     # ── 채움률 계산 ───────────────────────────────────────────────────────────
-    placed_vol = sum(int(np.prod(meta[p["item_index"]]["shape"])) for p in placed)
+    placed_vol = sum(_meta_volume(meta[p["item_index"]]) for p in placed)
     free_vol   = data.get("container_free_volume", int(np.prod(tray_size)))
     fill_rate  = placed_vol / free_vol if free_vol > 0 else 0.0
 
@@ -420,8 +493,8 @@ def visualize_data(data: dict[str, Any], source_name: str | None = None):
         fail_types = Counter(meta[p["item_index"]]["type_name"] for p in failed)
         print(f"\n[실패] 배치 실패 아이템 {len(failed)}개:")
         for type_name, count in fail_types.most_common():
-            shape = next(m["shape"] for m in meta if m["type_name"] == type_name)
-            print(f"  - {type_name} {shape}  × {count}개")
+            m = next(m for m in meta if m["type_name"] == type_name)
+            print(f"  - {type_name} {m['shape']}  × {count}개")
 
     print(f"\n[검증] 배치 {len(placed)}개 중 tray 범위 초과: {out_of_bounds}개")
     if "container_free_volume" in data:
@@ -438,17 +511,18 @@ def visualize_data(data: dict[str, Any], source_name: str | None = None):
         boxes.append((p["position"], rshape, p["item_index"]))
 
     overlap_count = 0
+    overlap_label = "바운딩박스 겹침 후보" if data.get("items_are_meshes") else "겹침"
     for a in range(len(boxes)):
         for b in range(a + 1, len(boxes)):
             p1, s1, idx1 = boxes[a]
             p2, s2, idx2 = boxes[b]
             if all(p1[i] < p2[i] + s2[i] and p2[i] < p1[i] + s1[i] for i in range(3)):
                 overlap_count += 1
-                print(f"  ⚠ 겹침: item {idx1} {p1}+{s1}  ↔  item {idx2} {p2}+{s2}")
+                print(f"  ⚠ {overlap_label}: item {idx1} {p1}+{s1}  ↔  item {idx2} {p2}+{s2}")
     if overlap_count == 0:
         print("[검증] 아이템 간 겹침 없음 ✓")
     else:
-        print(f"[검증] 겹치는 쌍: {overlap_count}개 ⚠")
+        print(f"[검증] {overlap_label}: {overlap_count}개 ⚠")
 
 
 def visualize(json_path: Path):

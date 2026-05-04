@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-3D Bin Packing — 임의 공간 메시에 박스 아이템 패킹
+3D Bin Packing — 임의 공간 메시에 STL 아이템 패킹
 =====================================================
 
 아래 '설정' 블록만 바꾸고 실행하면 됩니다.
@@ -14,6 +14,7 @@ Blender에서 실행:
 
 import csv
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -33,24 +34,20 @@ INPUT_DIR = _HERE.parent / "input_meshes"
 # ★ 설정 — 여기만 바꾸면 됩니다
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SPACE_FILE      = INPUT_DIR / "abstracted_trunk.ply"  # 패킹 공간 메시 (.obj/.stl/.ply 등)
+SPACE_FILE = INPUT_DIR / "abstracted_trunk.stl"  # 패킹 공간 메시 (.obj/.stl/.ply 등)
 RESOLUTION      = 128    # 복셀화 해상도 (가장 긴 축 기준 최대 복셀 수)
 NUM_ORIENTATIONS = 6     # 아이템 방향 수 (1 / 4 / 6 / 24)
 HEIGHT_PENALTY  = 50.0   # 높이 페널티 (클수록 아이템이 낮게 쌓임)
 OUTPUT_DIR      = None   # 결과 저장 경로 (None → results/<space_stem>/ 자동 생성)
 
-# 아이템 정의 (컨테이너 각 축 tray 크기에 대한 비율)
-# (이름, (x비율, y비율, z비율), 개수)
-# → 복셀화 후 실제 tray_size에 곱해 자동으로 절대 복셀 크기로 변환
-# 총 이론 볼륨 ≈ 395,508 vox → 이론 채움률 73% (실제: 일부 배치 실패 예상)
-ITEM_TYPES_RELATIVE = [
-    ("large_box",  (0.60, 0.30, 0.28),  3),
-    ("medium_box", (0.36, 0.22, 0.26),  4),
-    ("flat_box",   (0.55, 0.25, 0.08),  5),
-    ("tall_box",   (0.20, 0.14, 0.44),  4),
-    ("small_box",  (0.25, 0.14, 0.11),  6),
-    ("tiny_box",   (0.14, 0.09, 0.09),  8),
-]
+# 아이템 정의: INPUT_DIR 아래 test_box*.stl 파일을 모두 배치 대상으로 사용합니다.
+# 각 타입은 최소 1개 이상 포함하고, 총 아이템 점유 볼륨이 내부공간의
+# TARGET_ITEM_VOLUME_RATIO 배가 될 때까지 랜덤 타입을 골라 개수를 늘립니다.
+ITEM_MESH_PATTERN = "test_box*.stl"
+ITEM_COUNT_RANDOM_SEED = None  # None이면 매 실행마다 다른 랜덤 개수
+MIN_ITEM_COUNT_PER_TYPE = 1
+INITIAL_ITEM_COUNT_RANGE = (1, 4)
+TARGET_ITEM_VOLUME_RATIO = 1.25  # 100% 초과로 넣어 일부 아이템은 배치 실패하도록 함
 
 COLORS = [
     (0.90, 0.25, 0.20, 1.0),
@@ -63,38 +60,107 @@ COLORS = [
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def scale_item_types(item_types_relative, tray_size):
+def _natural_sort_key(path):
+    """test_box2가 test_box10보다 먼저 오도록 파일명을 정렬합니다."""
+    return [
+        int(part) if part.isdigit() else part
+        for part in re.split(r"(\d+)", Path(path).stem)
+    ]
+
+
+def discover_item_mesh_types(input_dir, pattern):
+    item_paths = sorted(Path(input_dir).glob(pattern), key=_natural_sort_key)
+    if not item_paths:
+        raise FileNotFoundError(f"아이템 STL 파일 없음: {Path(input_dir) / pattern}")
+    return [(path.stem, path) for path in item_paths]
+
+
+def _make_item_count_rng(seed):
+    resolved_seed = int(seed) if seed is not None else time.time_ns()
+    return np.random.default_rng(resolved_seed), resolved_seed
+
+
+def build_mesh_items(voxelizer, item_mesh_types, pitch, free_volume, target_ratio,
+                     rng, min_count_per_type, initial_count_range):
     """
-    상대 비율 기반 아이템 정의를 실제 복셀 크기로 변환합니다.
+    STL 아이템을 같은 pitch로 복셀화하고, 목표 볼륨까지 타입을 섞어 복제합니다.
 
-    Parameters
-    ----------
-    item_types_relative : list of (name, (fx, fy, fz), count)
-    tray_size           : tuple of (nx, ny, nz)
-
-    Returns
-    -------
-    list of (name, (vx, vy, vz), count)  — 복셀 단위 절대 크기
+    meta tuple:
+      (type_name, shape, type_idx, mesh_path, voxel_count, voxel_info)
+    item_types tuple:
+      (type_name, shape, count, mesh_path, voxel_count, voxel_info)
     """
-    result = []
-    for name, fracs, count in item_types_relative:
-        shape = tuple(max(1, int(round(f * d))) for f, d in zip(fracs, tray_size))
-        result.append((name, shape, count))
-    return result
+    if target_ratio <= 1.0:
+        raise ValueError("TARGET_ITEM_VOLUME_RATIO는 1.0보다 커야 배치 실패가 보장됩니다.")
 
+    min_count_per_type = max(1, int(min_count_per_type))
+    initial_low, initial_high = (int(initial_count_range[0]), int(initial_count_range[1]))
+    if initial_low < 1 or initial_high < initial_low:
+        raise ValueError("INITIAL_ITEM_COUNT_RANGE는 (1 이상, 하한 <= 상한)이어야 합니다.")
 
-def make_box(shape):
-    return np.ones(shape, dtype=np.int32)
+    prototypes = []
+    for type_idx, (type_name, mesh_path) in enumerate(item_mesh_types):
+        mesh_path = Path(mesh_path)
+        if not mesh_path.exists():
+            raise FileNotFoundError(f"아이템 파일 없음: {mesh_path}")
 
+        grid, info = voxelizer.voxelize_item(mesh_path, pitch)
+        if grid is None or info is None:
+            raise RuntimeError(f"아이템 복셀화 실패: {mesh_path}")
 
-def build_items(item_types):
+        grid = (grid > 0).astype(np.int32)
+        voxel_count = int(np.sum(grid > 0))
+        if voxel_count <= 0:
+            raise RuntimeError(f"아이템 복셀 수가 0입니다: {mesh_path}")
+
+        prototypes.append({
+            "type_name": type_name,
+            "mesh_path": mesh_path,
+            "grid": grid,
+            "shape": tuple(int(v) for v in grid.shape),
+            "voxel_count": voxel_count,
+            "voxel_info": info,
+            "type_idx": type_idx,
+        })
+
+    target_volume = max(1, int(np.ceil(free_volume * target_ratio)))
+    counts = rng.integers(
+        initial_low, initial_high + 1, size=len(prototypes)
+    ).astype(int).tolist()
+    counts = [max(min_count_per_type, count) for count in counts]
+    total_volume = sum(
+        proto["voxel_count"] * count
+        for proto, count in zip(prototypes, counts)
+    )
+    while total_volume < target_volume:
+        proto_idx = int(rng.integers(0, len(prototypes)))
+        counts[proto_idx] += 1
+        total_volume += prototypes[proto_idx]["voxel_count"]
+
     items = []
-    meta  = []
-    for type_idx, (type_name, shape, count) in enumerate(item_types):
+    meta = []
+    item_types = []
+    for proto, count in zip(prototypes, counts):
+        item_types.append((
+            proto["type_name"],
+            proto["shape"],
+            count,
+            proto["mesh_path"],
+            proto["voxel_count"],
+            proto["voxel_info"],
+        ))
         for _ in range(count):
-            items.append(make_box(shape))
-            meta.append((type_name, shape, type_idx))
-    return items, meta
+            items.append(proto["grid"])
+            meta.append((
+                proto["type_name"],
+                proto["shape"],
+                proto["type_idx"],
+                proto["mesh_path"],
+                proto["voxel_count"],
+                proto["voxel_info"],
+            ))
+
+    return items, meta, item_types
 
 
 def voxelize_space(space_path, resolution):
@@ -160,23 +226,85 @@ def _build_rot24():
 _ROT24 = _build_rot24()
 
 
-def get_rotated_shape(original_shape, orientation_idx, num_orientations=6):
+def get_rotation_matrix(orientation_idx, num_orientations=6):
     rots = _ROT6 if num_orientations <= 6 else _ROT24
     if orientation_idx >= len(rots):
         raise ValueError(
             f"orientation_index {orientation_idx} >= {len(rots)} "
             f"(num_orientations={num_orientations})"
         )
-    R = rots[orientation_idx]
+    return rots[orientation_idx]
+
+
+def get_rotated_shape(original_shape, orientation_idx, num_orientations=6):
+    R = get_rotation_matrix(orientation_idx, num_orientations)
     # abs(R) @ shape → 90° 회전 후 축 정렬 바운딩박스 크기
     rotated = np.abs(R) @ np.array(original_shape, dtype=float)
     return tuple(int(round(v)) for v in rotated)
+
+
+def _mesh_transform_matrix(voxel_info, position, orientation_idx, voxel_origin,
+                           num_orientations):
+    R = get_rotation_matrix(orientation_idx, num_orientations)
+    mesh_min = np.array(voxel_info.mesh_bounds_min, dtype=float)
+    mesh_max = np.array(voxel_info.mesh_bounds_max, dtype=float)
+    mesh_center = (mesh_min + mesh_max) / 2.0
+    mesh_half_extents = (mesh_max - mesh_min) / 2.0
+    rotated_half_extents = np.abs(R) @ mesh_half_extents
+
+    final_center = (
+        np.array(voxel_origin, dtype=float)
+        + np.array(position, dtype=float) * voxel_info.pitch
+        + rotated_half_extents
+    )
+
+    transform = np.eye(4, dtype=float)
+    transform[:3, :3] = R
+    transform[:3, 3] = final_center - R @ mesh_center
+    return transform
+
+
+def _import_blender_mesh(bpy, mesh_path, name):
+    suffix = mesh_path.suffix.lower()
+    bpy.ops.object.select_all(action='DESELECT')
+
+    if suffix == '.obj':
+        if hasattr(bpy.ops.wm, 'obj_import'):
+            bpy.ops.wm.obj_import(filepath=str(mesh_path), forward_axis='Y', up_axis='Z')
+        else:
+            bpy.ops.import_scene.obj(filepath=str(mesh_path), axis_forward='Y', axis_up='Z')
+    elif suffix == '.stl':
+        if hasattr(bpy.ops.wm, 'stl_import'):
+            bpy.ops.wm.stl_import(filepath=str(mesh_path))
+        else:
+            bpy.ops.import_mesh.stl(filepath=str(mesh_path))
+    elif suffix == '.ply':
+        if hasattr(bpy.ops.wm, 'ply_import'):
+            bpy.ops.wm.ply_import(filepath=str(mesh_path))
+        else:
+            bpy.ops.import_mesh.ply(filepath=str(mesh_path))
+    elif suffix in ('.gltf', '.glb'):
+        bpy.ops.import_scene.gltf(filepath=str(mesh_path))
+    else:
+        raise ValueError(f"Blender에서 {suffix} 직접 임포트 미지원: {mesh_path}")
+
+    imported_objects = list(bpy.context.selected_objects)
+    if not imported_objects:
+        raise RuntimeError(f"Blender 임포트 실패: {mesh_path}")
+    if len(imported_objects) > 1:
+        bpy.context.view_layer.objects.active = imported_objects[0]
+        bpy.ops.object.join()
+
+    obj = bpy.context.active_object or imported_objects[0]
+    obj.name = name
+    return obj
 
 
 def export_blender(result, meta, pitch, voxel_origin, space_path, out_dir, colors,
                    num_orientations):
     try:
         import bpy
+        import mathutils
     except ImportError:
         print(
             "\n[경고] bpy 없음 → Blender export 건너뜀\n"
@@ -193,23 +321,12 @@ def export_blender(result, meta, pitch, voxel_origin, space_path, out_dir, color
 
     # 컨테이너 메시 임포트 (axis 변환 없이 → trimesh 복셀 좌표계와 일치)
     print(f"  [Blender] voxel_origin={voxel_origin.tolist()}")
-    suffix = space_path.suffix.lower()
-    bpy.ops.object.select_all(action='DESELECT')
-    if suffix == '.obj':
-        if hasattr(bpy.ops.wm, 'obj_import'):
-            bpy.ops.wm.obj_import(filepath=str(space_path), forward_axis='Y', up_axis='Z')
-        else:
-            bpy.ops.import_scene.obj(filepath=str(space_path), axis_forward='Y', axis_up='Z')
-    elif suffix == '.stl':
-        bpy.ops.import_mesh.stl(filepath=str(space_path))
-    elif suffix == '.ply':
-        bpy.ops.import_mesh.ply(filepath=str(space_path))
-    elif suffix in ('.gltf', '.glb'):
-        bpy.ops.import_scene.gltf(filepath=str(space_path))
-    else:
-        print(f"  [경고] Blender에서 {suffix} 직접 임포트 미지원, 컨테이너 메시 생략")
+    try:
+        container_objs = [_import_blender_mesh(bpy, space_path, "Container")]
+    except Exception as e:
+        print(f"  [경고] 컨테이너 메시 임포트 실패: {e}")
+        container_objs = []
 
-    container_objs = list(bpy.context.selected_objects)
     for obj in container_objs:
         obj.name = "Container"
         mat = bpy.data.materials.new(name="Container_Mat")
@@ -223,16 +340,14 @@ def export_blender(result, meta, pitch, voxel_origin, space_path, out_dir, color
 
     placed = [p for p in result.placements if p.success]
     for i, p in enumerate(placed):
-        type_name, original_shape, type_idx = meta[p.item_index]
-        rshape = get_rotated_shape(original_shape, p.orientation_index, num_orientations)
-        center = voxel_origin + (np.array(p.position) + (np.array(rshape) - 1) / 2.0) * pitch
-
-        bpy.ops.mesh.primitive_cube_add(size=1.0)
-        obj = bpy.context.active_object
+        type_name, _shape, type_idx, mesh_path, _voxel_count, voxel_info = meta[p.item_index]
+        obj = _import_blender_mesh(bpy, mesh_path, f"Item_{i:03d}_{type_name}")
         obj.name = f"Item_{i:03d}_{type_name}"
-        obj.scale = (rshape[0] * pitch, rshape[1] * pitch, rshape[2] * pitch)
-        obj.location = tuple(float(c) for c in center)
-        bpy.ops.object.transform_apply(scale=True)
+        transform = _mesh_transform_matrix(
+            voxel_info, p.position, p.orientation_index,
+            voxel_origin, num_orientations,
+        )
+        obj.matrix_world = mathutils.Matrix(transform.tolist())
 
         color = colors[type_idx % len(colors)]
         mat = bpy.data.materials.new(name=f"Mat_{type_name}_{i}")
@@ -253,7 +368,7 @@ def save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, initial_t
 
     free_vol   = int((initial_tray == 0).sum())
     placed_vol = sum(
-        int(np.prod(meta[p.item_index][1]))
+        int(meta[p.item_index][4])
         for p in result.placements if p.success
     )
     fill_rate  = placed_vol / free_vol if free_vol > 0 else 0.0
@@ -292,7 +407,8 @@ def save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, initial_t
 
 
 def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_tray,
-              space_path, num_orientations, out_dir):
+              space_path, num_orientations, out_dir, item_mesh_pattern=None,
+              item_count_seed=None, target_item_volume_ratio=None):
     free_volume = int((initial_tray == 0).sum())
     data = {
         "space_name": space_path.stem,
@@ -301,16 +417,32 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
         "pitch":      float(pitch),
         "voxel_origin": [float(v) for v in voxel_origin],
         "num_orientations": num_orientations,
+        "item_mesh_pattern": item_mesh_pattern,
+        "item_count_seed": item_count_seed,
+        "target_item_volume_ratio": target_item_volume_ratio,
         # 아이템이 실제로 배치 가능한 복셀 수 (채움률 분모)
         "container_free_volume": free_volume,
+        "items_are_meshes": True,
         "item_types": [
-            {"type_name": tn, "shape": [int(v) for v in sh], "count": int(cnt)}
-            for tn, sh, cnt in item_types
+            {
+                "type_name": tn,
+                "shape": [int(v) for v in sh],
+                "count": int(cnt),
+                "mesh_file": Path(mesh_path).name,
+                "voxel_count": int(voxel_count),
+            }
+            for tn, sh, cnt, mesh_path, voxel_count, _info in item_types
         ],
         "colors": COLORS,
         "meta": [
-            {"type_name": tn, "shape": [int(v) for v in sh], "type_idx": int(ti)}
-            for tn, sh, ti in meta
+            {
+                "type_name": tn,
+                "shape": [int(v) for v in sh],
+                "type_idx": int(ti),
+                "mesh_file": Path(mesh_path).name,
+                "voxel_count": int(voxel_count),
+            }
+            for tn, sh, ti, mesh_path, voxel_count, _info in meta
         ],
         "placements": [
             {
@@ -319,6 +451,7 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
                 "orientation_index": int(p.orientation_index),
                 "success":          bool(p.success),
                 "score":            float(p.score) if p.score is not None else None,
+                "volume":           int(p.volume),
             }
             for p in result.placements
         ],
@@ -340,6 +473,28 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
     except Exception as _e:
         print(f"[경고] 컨테이너 메시 저장 실패 (visualize에서 형상이 보이지 않을 수 있음): {_e}")
 
+    # 아이템 메시 형상 저장 — visualize.py에서 실제 STL 형상으로 렌더링
+    try:
+        import trimesh as _trimesh
+        item_meshes = {}
+        for type_name, _shape, _count, mesh_path, _voxel_count, info in item_types:
+            _mesh = _trimesh.load(str(mesh_path), force="mesh")
+            if isinstance(_mesh, _trimesh.Trimesh):
+                item_meshes[type_name] = {
+                    "mesh_file": Path(mesh_path).name,
+                    "vertices": [
+                        [round(float(v), 6) for v in vert]
+                        for vert in _mesh.vertices
+                    ],
+                    "faces": _mesh.faces.tolist(),
+                    "bounds_min": [float(v) for v in info.mesh_bounds_min],
+                    "bounds_max": [float(v) for v in info.mesh_bounds_max],
+                }
+        data["item_meshes"] = item_meshes
+        print(f"[JSON] 아이템 메시: {len(item_meshes)}개 타입 저장")
+    except Exception as _e:
+        print(f"[경고] 아이템 메시 저장 실패 (visualize에서 박스로 표시됨): {_e}")
+
     output_json = out_dir / "packed_result.json"
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -360,6 +515,11 @@ def main():
     print(f"[설정] resolution={RESOLUTION}  orientations={NUM_ORIENTATIONS}"
           f"  height_penalty={HEIGHT_PENALTY}")
     print(f"[출력] {out_dir}")
+    item_mesh_types = discover_item_mesh_types(INPUT_DIR, ITEM_MESH_PATTERN)
+    item_count_rng, item_count_seed = _make_item_count_rng(ITEM_COUNT_RANDOM_SEED)
+    print(f"[아이템 파일] {ITEM_MESH_PATTERN} → "
+          f"{', '.join(Path(path).name for _name, path in item_mesh_types)}")
+    print(f"[랜덤] item_count_seed={item_count_seed}")
 
     # ── 1단계: 복셀화 → tray_size 확정 ────────────────────────────────────
     print("\n[복셀화 중...]")
@@ -367,16 +527,27 @@ def main():
         space_path, RESOLUTION,
     )
 
-    # ── 2단계: tray_size 기반 아이템 크기 자동 결정 ────────────────────────
-    item_types = scale_item_types(ITEM_TYPES_RELATIVE, tray_size)
-    items, meta = build_items(item_types)
+    # ── 2단계: 같은 pitch로 STL 아이템 복셀화 및 개수 자동 증량 ─────────────
+    free_vol = int((initial_tray == 0).sum())
+    items, meta, item_types = build_mesh_items(
+        voxelizer,
+        item_mesh_types,
+        pitch,
+        free_vol,
+        TARGET_ITEM_VOLUME_RATIO,
+        item_count_rng,
+        MIN_ITEM_COUNT_PER_TYPE,
+        INITIAL_ITEM_COUNT_RANGE,
+    )
 
-    total_item_vol = sum(int(np.prod(m[1])) for m in meta)
-    print(f"\n[아이템] {len(items)}개  총 볼륨 {total_item_vol:,} vox"
-          f"  (tray {tray_size} 기준 자동 크기)")
-    for type_name, shape, count in item_types:
-        vol = int(np.prod(shape))
-        print(f"         {type_name:12s} {str(shape):18s} × {count:2d}개 = {vol*count:,} vox")
+    total_item_vol = sum(int(m[4]) for m in meta)
+    print(f"\n[아이템] {len(items)}개  총 점유 볼륨 {total_item_vol:,} vox"
+          f"  (내부공간 대비 {total_item_vol / max(1, free_vol):.1%})")
+    for type_name, shape, count, mesh_path, voxel_count, _info in item_types:
+        print(
+            f"         {type_name:12s} {str(shape):18s} × {count:3d}개 "
+            f"= {voxel_count * count:,} vox  ({Path(mesh_path).name})"
+        )
 
     # ── 3단계: 패킹 ─────────────────────────────────────────────────────────
     print("\n[패킹 시작]")
@@ -386,10 +557,9 @@ def main():
     )
 
     placed_vol = sum(
-        int(np.prod(meta[p.item_index][1]))
+        int(meta[p.item_index][4])
         for p in result.placements if p.success
     )
-    free_vol  = int((initial_tray == 0).sum())
     fill_rate = placed_vol / free_vol if free_vol > 0 else 0.0
     print(f"[결과] 배치 성공: {result.num_placed}/{len(items)}개")
     print(f"[결과] 채움률:    {fill_rate:.1%}  (내부공간 {free_vol:,} vox 기준)")
@@ -411,7 +581,10 @@ def main():
     save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, initial_tray,
              total_elapsed, out_dir)
     save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_tray,
-              space_path, NUM_ORIENTATIONS, out_dir)
+              space_path, NUM_ORIENTATIONS, out_dir,
+              item_mesh_pattern=ITEM_MESH_PATTERN,
+              item_count_seed=item_count_seed,
+              target_item_volume_ratio=TARGET_ITEM_VOLUME_RATIO)
 
     json_path = out_dir / "packed_result.json"
     print(f"\n[완료] {total_elapsed:.1f}s")
