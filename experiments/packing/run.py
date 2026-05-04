@@ -61,6 +61,7 @@ SPACE_TRANSFORM = np.array(
 # 각 타입은 최소 1개 이상 포함하고, 총 아이템 점유 볼륨이 내부공간의
 # TARGET_ITEM_VOLUME_RATIO 배에 도달할 때까지 랜덤 타입을 골라 개수를 늘립니다.
 ITEM_MESH_PATTERN = "test_box*.stl"
+ALIGN_ITEM_PRINCIPAL_AXES = True  # STL 내부 주축을 X/Y/Z 축에 맞춘 뒤 패킹/표시
 ITEM_COUNT_RANDOM_SEED = None  # None이면 매 실행마다 다른 랜덤 개수
 MIN_ITEM_COUNT_PER_TYPE = 1
 INITIAL_ITEM_COUNT_RANGE = (1, 4)
@@ -97,15 +98,97 @@ def _make_item_count_rng(seed):
     return np.random.default_rng(resolved_seed), resolved_seed
 
 
+def _load_trimesh(mesh_path):
+    import trimesh
+
+    from spectral_packer.mesh_io import load_mesh
+
+    vertices, faces = load_mesh(mesh_path, validate=True, repair=True)
+    return trimesh.Trimesh(vertices=vertices, faces=faces)
+
+
+def _principal_axes_transform(mesh):
+    """메시의 PCA 주축을 X/Y/Z에 맞추는 4×4 변환 행렬을 반환합니다."""
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    if len(vertices) < 3:
+        return np.eye(4, dtype=float)
+
+    center = vertices.mean(axis=0)
+    centered = vertices - center
+    cov = centered.T @ centered / max(1, len(vertices) - 1)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    axes = eigvecs[:, order]
+
+    for col in range(3):
+        major = int(np.argmax(np.abs(axes[:, col])))
+        if axes[major, col] < 0:
+            axes[:, col] *= -1
+    if np.linalg.det(axes) < 0:
+        axes[:, -1] *= -1
+
+    rotation = axes.T
+    transform = np.eye(4, dtype=float)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = center - rotation @ center
+    return transform
+
+
+def _voxelize_item_mesh(voxelizer, mesh_path, mesh, pitch, transform=None):
+    from spectral_packer.voxelizer import LogEntry, VoxelizationInfo
+
+    mesh_path = Path(mesh_path)
+    t0 = time.perf_counter()
+    mesh = mesh.copy()
+    transformed = transform is not None and not np.allclose(transform, np.eye(4))
+    if transformed:
+        mesh.apply_transform(np.asarray(transform, dtype=float))
+
+    try:
+        bounds = mesh.bounds
+        vox = mesh.voxelized(pitch=pitch)
+        try:
+            grid = vox.fill().matrix.astype("int32")
+        except Exception as e:
+            grid = vox.matrix.astype("int32")
+            voxelizer.log.append(
+                LogEntry(f"item_voxelization_fill_fallback:{mesh_path.name}", 0, False, str(e))
+            )
+
+        info = VoxelizationInfo(
+            mesh_path=mesh_path,
+            mesh_bounds_min=bounds[0].copy(),
+            mesh_bounds_max=bounds[1].copy(),
+            pitch=pitch,
+            voxel_shape=grid.shape,
+        )
+        elapsed = time.perf_counter() - t0
+        note = f"shape={grid.shape} voxels={int(grid.sum())}"
+        if transformed:
+            note += " transform=principal_axes"
+        voxelizer.log.append(LogEntry(
+            f"item_voxelization:{mesh_path.name}", elapsed, True, note,
+        ))
+        return grid, info, mesh
+
+    except Exception as e:
+        elapsed = time.perf_counter() - t0
+        voxelizer.log.append(
+            LogEntry(f"item_voxelization:{mesh_path.name}", elapsed, False, str(e))
+        )
+        return None, None, None
+
+
 def build_mesh_items(voxelizer, item_mesh_types, pitch, free_volume, target_ratio,
-                     rng, min_count_per_type, initial_count_range):
+                     rng, min_count_per_type, initial_count_range,
+                     align_principal_axes=False):
     """
     STL 아이템을 같은 pitch로 복셀화하고, 목표 볼륨까지 타입을 섞어 복제합니다.
 
     meta tuple:
-      (type_name, shape, type_idx, mesh_path, voxel_count, voxel_info)
+      (type_name, shape, type_idx, mesh_path, voxel_count, voxel_info, item_transform)
     item_types tuple:
-      (type_name, shape, count, mesh_path, voxel_count, voxel_info)
+      (type_name, shape, count, mesh_path, voxel_count, voxel_info, item_transform)
     """
     if target_ratio <= 0:
         raise ValueError("TARGET_ITEM_VOLUME_RATIO는 0보다 커야 합니다.")
@@ -121,7 +204,15 @@ def build_mesh_items(voxelizer, item_mesh_types, pitch, free_volume, target_rati
         if not mesh_path.exists():
             raise FileNotFoundError(f"아이템 파일 없음: {mesh_path}")
 
-        grid, info = voxelizer.voxelize_item(mesh_path, pitch)
+        mesh = _load_trimesh(mesh_path)
+        item_transform = (
+            _principal_axes_transform(mesh)
+            if align_principal_axes
+            else np.eye(4, dtype=float)
+        )
+        grid, info, _aligned_mesh = _voxelize_item_mesh(
+            voxelizer, mesh_path, mesh, pitch, transform=item_transform,
+        )
         if grid is None or info is None:
             raise RuntimeError(f"아이템 복셀화 실패: {mesh_path}")
 
@@ -137,6 +228,7 @@ def build_mesh_items(voxelizer, item_mesh_types, pitch, free_volume, target_rati
             "shape": tuple(int(v) for v in grid.shape),
             "voxel_count": voxel_count,
             "voxel_info": info,
+            "item_transform": item_transform,
             "type_idx": type_idx,
         })
 
@@ -165,6 +257,7 @@ def build_mesh_items(voxelizer, item_mesh_types, pitch, free_volume, target_rati
             proto["mesh_path"],
             proto["voxel_count"],
             proto["voxel_info"],
+            proto["item_transform"],
         ))
         for _ in range(count):
             items.append(proto["grid"])
@@ -175,6 +268,7 @@ def build_mesh_items(voxelizer, item_mesh_types, pitch, free_volume, target_rati
                 proto["mesh_path"],
                 proto["voxel_count"],
                 proto["voxel_info"],
+                proto["item_transform"],
             ))
 
     return items, meta, item_types
@@ -184,8 +278,8 @@ def voxelize_space(space_path, resolution, transform=None):
     """메시를 복셀화하고 (voxelizer, initial_tray, pitch, tray_size, voxel_origin) 반환.
 
     transform 이 4×4 행렬이고 항등행렬이 아닐 경우, 메시를 메모리상에서 변환한 뒤
-    voxelize 합니다 (원본 파일은 수정되지 않음). 변환은 공간 메시에만 적용되며,
-    아이템 메시는 항상 원래 좌표계 그대로 voxelize 됩니다.
+    voxelize 합니다 (원본 파일은 수정되지 않음). 이 함수의 transform 은 공간 메시에만
+    적용되며, 아이템 메시 보정은 build_mesh_items 단계에서 별도로 처리합니다.
     """
     from spectral_packer.voxelizer import Voxelizer
 
@@ -438,13 +532,23 @@ def export_blender(result, meta, pitch, voxel_origin, space_path, out_dir, color
 
     placed = [p for p in result.placements if p.success]
     for i, p in enumerate(placed):
-        type_name, _shape, type_idx, mesh_path, _voxel_count, voxel_info = meta[p.item_index]
+        (
+            type_name,
+            _shape,
+            type_idx,
+            mesh_path,
+            _voxel_count,
+            voxel_info,
+            item_transform,
+        ) = meta[p.item_index]
         obj = _import_blender_mesh(bpy, mesh_path, f"Item_{i:03d}_{type_name}")
         obj.name = f"Item_{i:03d}_{type_name}"
         transform = _mesh_transform_matrix(
             voxel_info, p.position, p.orientation_index,
             voxel_origin, num_orientations,
         )
+        if item_transform is not None:
+            transform = transform @ np.asarray(item_transform, dtype=float)
         obj.matrix_world = mathutils.Matrix(transform.tolist())
 
         color = colors[type_idx % len(colors)]
@@ -507,7 +611,7 @@ def save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, initial_t
 def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_tray,
               space_path, num_orientations, out_dir, item_mesh_pattern=None,
               item_count_seed=None, target_item_volume_ratio=None,
-              space_transform=None):
+              space_transform=None, align_item_principal_axes=False):
     free_volume = int((initial_tray == 0).sum())
     data = {
         "space_name": space_path.stem,
@@ -517,6 +621,7 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
         "voxel_origin": [float(v) for v in voxel_origin],
         "num_orientations": num_orientations,
         "item_mesh_pattern": item_mesh_pattern,
+        "align_item_principal_axes": bool(align_item_principal_axes),
         "item_count_seed": item_count_seed,
         "target_item_volume_ratio": target_item_volume_ratio,
         # 아이템이 실제로 배치 가능한 복셀 수 (채움률 분모)
@@ -529,8 +634,13 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
                 "count": int(cnt),
                 "mesh_file": Path(mesh_path).name,
                 "voxel_count": int(voxel_count),
+                "item_transform": (
+                    np.asarray(item_transform, dtype=float).tolist()
+                    if item_transform is not None
+                    else None
+                ),
             }
-            for tn, sh, cnt, mesh_path, voxel_count, _info in item_types
+            for tn, sh, cnt, mesh_path, voxel_count, _info, item_transform in item_types
         ],
         "colors": COLORS,
         "meta": [
@@ -541,7 +651,7 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
                 "mesh_file": Path(mesh_path).name,
                 "voxel_count": int(voxel_count),
             }
-            for tn, sh, ti, mesh_path, voxel_count, _info in meta
+            for tn, sh, ti, mesh_path, voxel_count, _info, _item_transform in meta
         ],
         "placements": [
             {
@@ -591,11 +701,28 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
     try:
         import trimesh as _trimesh
         item_meshes = {}
-        for type_name, _shape, _count, mesh_path, _voxel_count, info in item_types:
+        for (
+            type_name,
+            _shape,
+            _count,
+            mesh_path,
+            _voxel_count,
+            info,
+            item_transform,
+        ) in item_types:
             _mesh = _trimesh.load(str(mesh_path), force="mesh")
             if isinstance(_mesh, _trimesh.Trimesh):
+                if item_transform is not None and not np.allclose(
+                    np.asarray(item_transform, dtype=float), np.eye(4)
+                ):
+                    _mesh = _mesh.copy()
+                    _mesh.apply_transform(np.asarray(item_transform, dtype=float))
                 item_meshes[type_name] = {
                     "mesh_file": Path(mesh_path).name,
+                    "normalized": bool(
+                        item_transform is not None
+                        and not np.allclose(np.asarray(item_transform, dtype=float), np.eye(4))
+                    ),
                     "vertices": [
                         [round(float(v), 6) for v in vert]
                         for vert in _mesh.vertices
@@ -633,6 +760,8 @@ def main():
     item_count_rng, item_count_seed = _make_item_count_rng(ITEM_COUNT_RANDOM_SEED)
     print(f"[아이템 파일] {ITEM_MESH_PATTERN} → "
           f"{', '.join(Path(path).name for _name, path in item_mesh_types)}")
+    if ALIGN_ITEM_PRINCIPAL_AXES:
+        print("[아이템 좌표계] PCA 주축 정렬 적용")
     print(f"[랜덤] item_count_seed={item_count_seed}")
 
     # ── 1단계: 복셀화 → tray_size 확정 ────────────────────────────────────
@@ -654,12 +783,21 @@ def main():
         item_count_rng,
         MIN_ITEM_COUNT_PER_TYPE,
         INITIAL_ITEM_COUNT_RANGE,
+        align_principal_axes=ALIGN_ITEM_PRINCIPAL_AXES,
     )
 
     total_item_vol = sum(int(m[4]) for m in meta)
     print(f"\n[아이템] {len(items)}개  총 점유 볼륨 {total_item_vol:,} vox"
           f"  (내부공간 대비 {total_item_vol / max(1, free_vol):.1%})")
-    for type_name, shape, count, mesh_path, voxel_count, _info in item_types:
+    for (
+        type_name,
+        shape,
+        count,
+        mesh_path,
+        voxel_count,
+        _info,
+        _item_transform,
+    ) in item_types:
         print(
             f"         {type_name:12s} {str(shape):18s} × {count:3d}개 "
             f"= {voxel_count * count:,} vox  ({Path(mesh_path).name})"
@@ -701,7 +839,8 @@ def main():
               item_mesh_pattern=ITEM_MESH_PATTERN,
               item_count_seed=item_count_seed,
               target_item_volume_ratio=TARGET_ITEM_VOLUME_RATIO,
-              space_transform=SPACE_TRANSFORM)
+              space_transform=SPACE_TRANSFORM,
+              align_item_principal_axes=ALIGN_ITEM_PRINCIPAL_AXES)
 
     json_path = out_dir / "packed_result.json"
     print(f"\n[완료] {total_elapsed:.1f}s")
