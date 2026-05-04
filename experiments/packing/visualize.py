@@ -250,8 +250,8 @@ def _container_mesh_trace(verts_vox, faces):
     return go.Mesh3d(
         x=v[:, 0], y=v[:, 1], z=v[:, 2],
         i=f[:, 0], j=f[:, 1], k=f[:, 2],
-        color='lightsteelblue',
-        opacity=0.12,
+        color='#6f8fae',
+        opacity=0.22,
         flatshading=False,
         lighting=dict(
             ambient=0.6,
@@ -364,6 +364,14 @@ def visualize_data(data: dict[str, Any], source_name: str | None = None):
         verts_vox   = (verts_world - voxel_origin) / pitch
 
         traces.append(_container_mesh_trace(verts_vox, faces))
+        cmin = verts_vox.min(axis=0)
+        cmax = verts_vox.max(axis=0)
+        traces.append(_wireframe(
+            *cmin, *(cmax - cmin),
+            color='rgba(220,235,255,0.95)',
+            name='Container',
+            width=4,
+        ))
         print(f"[컨테이너] 메시 렌더링: {len(verts_world)}개 정점, {len(faces)}개 삼각형")
 
     elif "container_walls" in data:
@@ -403,14 +411,14 @@ def visualize_data(data: dict[str, Any], source_name: str | None = None):
                 mesh_data["faces"],
                 color=color,
                 name=type_name,
-                opacity=0.95,
+                opacity=1.0,
                 show_legend=first_of_type,
             ))
         else:
             traces.append(_box_mesh(
                 *pos, *rshape,
                 color=color, name=type_name,
-                opacity=0.95, show_legend=first_of_type,
+                opacity=1.0, show_legend=first_of_type,
             ))
             traces.append(_wireframe(*pos, *rshape, color='#222222', name=type_name, width=2))
 
@@ -428,27 +436,55 @@ def visualize_data(data: dict[str, Any], source_name: str | None = None):
     _cum_x = _base_x
     for _type_name in sorted(_type_groups):
         _group       = _type_groups[_type_name]
-        _group_width = max(tuple(m["shape"])[0] for _, m in _group)
+        _group_width = max(
+            get_rotated_shape(
+                m["shape"], p.get("orientation_index", 0), num_orientations
+            )[0]
+            for p, m in _group
+        )
         _cum_z       = 0
 
         for p, m in _group:
             type_name = m["type_name"]
             type_idx  = m["type_idx"]
-            shape     = tuple(m["shape"])
+            orientation_idx = p.get("orientation_index", 0)
+            rshape    = get_rotated_shape(
+                m["shape"], orientation_idx, num_orientations
+            )
 
             fx, fy, fz = _cum_x, 0, _cum_z
-            _cum_z += shape[2] + _GAP
+            _cum_z += rshape[2] + _GAP
 
             color         = colors[type_idx % len(colors)]
             label         = f"[실패] {type_name}"
             first_of_type = label not in seen_types
             seen_types.add(label)
-            traces.append(_box_mesh(
-                fx, fy, fz, *shape,
-                color=color, name=label,
-                opacity=0.40, show_legend=first_of_type,
-            ))
-            traces.append(_wireframe(fx, fy, fz, *shape, color=color, name=label))
+
+            mesh_data = item_meshes.get(type_name)
+            if mesh_data:
+                verts_vox = _item_mesh_vertices_vox(
+                    mesh_data,
+                    [fx, fy, fz],
+                    orientation_idx,
+                    voxel_origin,
+                    pitch,
+                    num_orientations,
+                )
+                traces.append(_item_mesh_trace(
+                    verts_vox,
+                    mesh_data["faces"],
+                    color=color,
+                    name=label,
+                    opacity=0.75,
+                    show_legend=first_of_type,
+                ))
+            else:
+                traces.append(_box_mesh(
+                    fx, fy, fz, *rshape,
+                    color=color, name=label,
+                    opacity=0.75, show_legend=first_of_type,
+                ))
+                traces.append(_wireframe(fx, fy, fz, *rshape, color=color, name=label))
 
         _cum_x += _group_width + _GAP
 
