@@ -194,6 +194,17 @@ class BinPacker:
         If True, only place items in positions where they can be removed
         without colliding with other items (Section 4.3 of the paper).
         This results in lower packing density but guarantees no interlocking.
+    support_threshold : float, default 0.0
+        Minimum fraction of the item's downward-facing voxels that must
+        rest on the tray floor or on occupied voxels (walls / other items)
+        for a placement to be accepted. 0.0 disables the support constraint
+        (original behavior). When enabled, the item's center of mass must
+        also project inside the convex hull of its supported contacts.
+        Not compatible with ``interlocking_free`` or
+        ``continuous_refinement`` (v1).
+    support_top_k : int, default 256
+        Number of best-scoring candidate positions to test against the
+        center-of-mass condition before giving up (support mode only).
 
     Attributes
     ----------
@@ -239,6 +250,8 @@ class BinPacker:
         continuous_refinement: bool = False,
         pitch: Optional[float] = None,
         verbose: bool = False,
+        support_threshold: float = 0.0,
+        support_top_k: int = 256,
     ):
         if len(tray_size) != 3:
             raise ValueError(f"tray_size must be a 3-tuple, got {len(tray_size)} elements")
@@ -250,6 +263,21 @@ class BinPacker:
             raise ValueError(f"num_orientations must be 1, 4, 6, or 24, got {num_orientations}")
         if pitch is not None and pitch <= 0:
             raise ValueError(f"pitch must be positive, got {pitch}")
+        if not 0.0 <= support_threshold <= 1.0:
+            raise ValueError(
+                f"support_threshold must be in [0, 1], got {support_threshold}"
+            )
+        if support_threshold > 0.0 and interlocking_free:
+            raise ValueError(
+                "support_threshold cannot be combined with interlocking_free (v1)"
+            )
+        if support_threshold > 0.0 and continuous_refinement:
+            raise ValueError(
+                "support_threshold cannot be combined with continuous_refinement: "
+                "sub-voxel refinement does not re-check the support condition"
+            )
+        if support_top_k <= 0:
+            raise ValueError(f"support_top_k must be positive, got {support_top_k}")
 
         self.tray_size = tuple(tray_size)
         self.voxel_resolution = voxel_resolution
@@ -257,6 +285,8 @@ class BinPacker:
         self.num_orientations = num_orientations
         self.interlocking_free = interlocking_free
         self.continuous_refinement = continuous_refinement
+        self.support_threshold = float(support_threshold)
+        self.support_top_k = int(support_top_k)
         self.pitch = pitch
         self.verbose = verbose
         self.log: List[LogEntry] = []
@@ -482,7 +512,11 @@ class BinPacker:
             # Pre-compute distance field ONCE per item (not per orientation)
             # Use only placed items (tray > id_offset) — exclude walls (= id_offset)
             # so that proximity scoring attracts items to each other, not to walls.
-            if self.num_orientations > 1 or self.interlocking_free:
+            # Support mode always needs it, even for a single orientation
+            # (the C++ single-orientation path would use the wall-included
+            # tray instead — the score therefore differs slightly there).
+            support_enabled = self.support_threshold > 0.0
+            if self.num_orientations > 1 or self.interlocking_free or support_enabled:
                 item_only_tray = (tray > id_offset).astype(np.int32)
                 tray_distance = self._compute_distance_field(item_only_tray)
 
@@ -516,7 +550,11 @@ class BinPacker:
                     if any(rotated_item.shape[i] > self.tray_size[i] for i in range(3)):
                         continue
 
-                    if self.num_orientations > 1:
+                    if support_enabled:
+                        position, found, score = self._search_placement_supported(
+                            rotated_item, tray, tray_distance
+                        )
+                    elif self.num_orientations > 1:
                         position, found, score = fft_search_placement_with_cache(
                             rotated_item, tray, tray_distance, generation
                         )
@@ -574,7 +612,11 @@ class BinPacker:
                     f"place_item:{orig_idx}",
                     time.perf_counter() - item_start,
                     False,
-                    "no valid placement",
+                    (
+                        f"no supported placement (support_threshold={self.support_threshold})"
+                        if support_enabled
+                        else "no valid placement"
+                    ),
                 )
 
         # Sort placements by original index for consistent ordering
@@ -637,6 +679,80 @@ class BinPacker:
 
         if found:
             return tuple(position), True, score
+        return None, False, 0.0
+
+    def _search_placement_supported(
+        self,
+        item: np.ndarray,
+        tray: np.ndarray,
+        tray_phi: np.ndarray,
+    ) -> Tuple[Optional[Tuple[int, int, int]], bool, float]:
+        """Find the best placement that satisfies the support constraint.
+
+        Reimplements the C++ search score in Python so that candidate
+        positions can be filtered before the argmin (the C++ search only
+        returns its single best position):
+
+            score(q) = proximity(q) / |item| + height_penalty * (q_z / L)^3
+
+        where ``proximity = dft_corr3(tray_phi, padded_item)`` and the
+        feasible set is ``collision_grid(tray, item) == 0`` (the binding
+        marks out-of-bounds origins as colliding — linear convolution,
+        no circular wrap). On top of that, candidates must have a support
+        ratio >= ``support_threshold``; the best ``support_top_k`` of them
+        (by score) are then tested against the center-of-mass condition.
+
+        Returns
+        -------
+        (position, found, score) — same contract as ``fft_search_placement``.
+        """
+        from . import collision_grid, dft_corr3
+        from .support import com_supported, support_ratio_grid
+
+        tray_shape = tray.shape
+
+        # Pad item to tray size at the origin corner (same as C++ padto3d).
+        padded = np.zeros(tray_shape, dtype=np.int32)
+        padded[: item.shape[0], : item.shape[1], : item.shape[2]] = item
+
+        collision = np.asarray(collision_grid(tray, item))
+        feasible = collision == 0
+
+        occ = (tray != 0).astype(np.int32)
+        ratio, contact_count = support_ratio_grid(occ, item, ground_at_z0=True)
+        if contact_count == 0:
+            return None, False, 0.0
+
+        proximity = np.asarray(dft_corr3(tray_phi.astype(np.int32), padded))
+        if collision.shape != tray_shape or proximity.shape != tray_shape:
+            # The C++ bindings truncate their FFT results back to tray size
+            # (dft_conv3 → truncateto3d); flat-index math below relies on it.
+            raise RuntimeError(
+                f"binding output shape mismatch: collision={collision.shape} "
+                f"proximity={proximity.shape} tray={tray_shape}"
+            )
+        norm = float(max(1, int(np.count_nonzero(item))))
+        depth = tray_shape[2]
+        qz = (np.arange(depth, dtype=np.float64) / depth) ** 3
+        score = proximity / norm + self.height_penalty * qz[np.newaxis, np.newaxis, :]
+
+        # Numerical guard on the ratio comparison (FFT round-off).
+        valid = feasible & (ratio >= self.support_threshold - 1e-9)
+        valid_idx = np.flatnonzero(valid)
+        if valid_idx.size == 0:
+            return None, False, 0.0
+
+        flat_score = score.ravel()
+        k = min(self.support_top_k, valid_idx.size)
+        top = valid_idx[np.argpartition(flat_score[valid_idx], k - 1)[:k]]
+        top = top[np.argsort(flat_score[top])]
+
+        for flat in top:
+            pos = np.unravel_index(flat, tray_shape)
+            if com_supported(item, occ, pos, ground_at_z0=True):
+                position = tuple(int(v) for v in pos)
+                return position, True, float(flat_score[flat])
+
         return None, False, 0.0
 
     def _refine_placement(
@@ -717,5 +833,6 @@ class BinPacker:
             f"voxel_resolution={self.voxel_resolution}, "
             f"num_orientations={self.num_orientations}, "
             f"height_penalty={self.height_penalty}, "
-            f"continuous_refinement={self.continuous_refinement})"
+            f"continuous_refinement={self.continuous_refinement}, "
+            f"support_threshold={self.support_threshold})"
         )

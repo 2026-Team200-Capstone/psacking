@@ -38,6 +38,7 @@ SPACE_FILE = INPUT_DIR / "abstracted_trunk.stl"  # 패킹 공간 메시 (.obj/.s
 RESOLUTION      = 128    # 복셀화 해상도 (가장 긴 축 기준 최대 복셀 수)
 NUM_ORIENTATIONS = 6     # 아이템 방향 수 (1 / 4 / 6 / 24)
 HEIGHT_PENALTY  = 50.0   # 높이 페널티 (클수록 아이템이 낮게 쌓임)
+SUPPORT_THRESHOLD = 0.4  # 지지 조건: 바닥 접촉면 중 지지된 비율 하한 (0 = 비활성)
 OUTPUT_DIR      = None   # 결과 저장 경로 (None → results/<space_stem>/ 자동 생성)
 
 # 공간 메시 좌표계 보정 변환 (4×4 행렬, world ← world)
@@ -358,7 +359,7 @@ def _voxelize_space_with_transform(voxelizer, space_path, transform):
 
 
 def pack_items(items, initial_tray, tray_size, pitch, resolution, num_orientations,
-               height_penalty):
+               height_penalty, support_threshold=0.0):
     """아이템을 voxel tray에 패킹하고 (result, packer) 반환."""
     from spectral_packer import BinPacker
 
@@ -368,6 +369,7 @@ def pack_items(items, initial_tray, tray_size, pitch, resolution, num_orientatio
         num_orientations=num_orientations,
         height_penalty=height_penalty,
         pitch=pitch,
+        support_threshold=support_threshold,
     )
     result = packer.pack_voxels(items, initial_tray=initial_tray)
     return result, packer
@@ -611,7 +613,8 @@ def save_csv(voxelizer, packer, result, meta, tray_size, voxel_origin, initial_t
 def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_tray,
               space_path, num_orientations, out_dir, item_mesh_pattern=None,
               item_count_seed=None, target_item_volume_ratio=None,
-              space_transform=None, align_item_principal_axes=False):
+              space_transform=None, align_item_principal_axes=False,
+              support_threshold=0.0):
     free_volume = int((initial_tray == 0).sum())
     data = {
         "space_name": space_path.stem,
@@ -620,6 +623,7 @@ def save_json(result, meta, item_types, tray_size, pitch, voxel_origin, initial_
         "pitch":      float(pitch),
         "voxel_origin": [float(v) for v in voxel_origin],
         "num_orientations": num_orientations,
+        "support_threshold": float(support_threshold),
         "item_mesh_pattern": item_mesh_pattern,
         "align_item_principal_axes": bool(align_item_principal_axes),
         "item_count_seed": item_count_seed,
@@ -754,7 +758,7 @@ def main():
 
     print(f"[공간] {space_path}")
     print(f"[설정] resolution={RESOLUTION}  orientations={NUM_ORIENTATIONS}"
-          f"  height_penalty={HEIGHT_PENALTY}")
+          f"  height_penalty={HEIGHT_PENALTY}  support_threshold={SUPPORT_THRESHOLD}")
     print(f"[출력] {out_dir}")
     item_mesh_types = discover_item_mesh_types(INPUT_DIR, ITEM_MESH_PATTERN)
     item_count_rng, item_count_seed = _make_item_count_rng(ITEM_COUNT_RANDOM_SEED)
@@ -808,6 +812,7 @@ def main():
     result, packer = pack_items(
         items, initial_tray, tray_size, pitch,
         RESOLUTION, NUM_ORIENTATIONS, HEIGHT_PENALTY,
+        support_threshold=SUPPORT_THRESHOLD,
     )
 
     placed_vol = sum(
@@ -840,7 +845,8 @@ def main():
               item_count_seed=item_count_seed,
               target_item_volume_ratio=TARGET_ITEM_VOLUME_RATIO,
               space_transform=SPACE_TRANSFORM,
-              align_item_principal_axes=ALIGN_ITEM_PRINCIPAL_AXES)
+              align_item_principal_axes=ALIGN_ITEM_PRINCIPAL_AXES,
+              support_threshold=SUPPORT_THRESHOLD)
 
     json_path = out_dir / "packed_result.json"
     print(f"\n[완료] {total_elapsed:.1f}s")
