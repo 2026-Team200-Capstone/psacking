@@ -47,6 +47,10 @@ dependencies = [
     "numpy>=1.20.0",
     "trimesh>=3.21.0",
     "scipy>=1.7.0",
+    # trimesh가 메시 수리·분리에 쓴다. docker/entrypoint.sh가 따로 깔아 주고
+    # 있어서 여기 빠진 게 드러나지 않았는데, entrypoint를 거치지 않는 곳(패킹
+    # 플랫폼 워커)에서는 메시에 따라 ImportError가 난다.
+    "networkx>=3.0",
 ]
 
 [project.optional-dependencies]
