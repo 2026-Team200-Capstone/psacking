@@ -1,6 +1,8 @@
 [build-system]
 requires = [
-    "scikit-build-core>=0.5.0",
+    # 0.8에서 cmake.minimum-version이 cmake.version으로 바뀌었다. 상한 없이 두면
+    # 최신이 깔려 옛 키를 거부하므로 하한을 여기에 맞춘다.
+    "scikit-build-core>=0.8",
     "pybind11>=2.11.0",
     "cmake>=3.18",
     "ninja",
@@ -77,7 +79,7 @@ Repository = "https://github.com/spectral-packer/spectral-packer"
 Issues = "https://github.com/spectral-packer/spectral-packer/issues"
 
 [tool.scikit-build]
-cmake.minimum-version = "3.18"
+cmake.version = ">=3.18"
 cmake.build-type = "Release"
 ninja.make-fallback = true
 wheel.packages = ["spectral_packer"]
