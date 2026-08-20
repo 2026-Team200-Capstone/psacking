@@ -66,7 +66,7 @@ ALIGN_ITEM_PRINCIPAL_AXES = True  # STL 내부 주축을 X/Y/Z 축에 맞춘 뒤
 ITEM_COUNT_RANDOM_SEED = None  # None이면 매 실행마다 다른 랜덤 개수
 MIN_ITEM_COUNT_PER_TYPE = 1
 INITIAL_ITEM_COUNT_RANGE = (1, 4)
-TARGET_ITEM_VOLUME_RATIO = 0.45  # 기존 1.25는 과투입이라 실패 물품이 많이 생김
+TARGET_ITEM_VOLUME_RATIO = 0.7  # 트렁크 부피의 70%까지 투입 (1.25는 과투입이라 실패가 많음)
 
 COLORS = [
     (0.90, 0.25, 0.20, 1.0),
