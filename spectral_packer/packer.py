@@ -416,6 +416,7 @@ class BinPacker:
         items: Sequence[np.ndarray],
         sort_by_volume: bool = True,
         initial_tray: Optional[np.ndarray] = None,
+        orientations_per_item: Optional[Sequence[int]] = None,
     ) -> PackingResult:
         """
         Pack pre-voxelized items.
@@ -431,6 +432,13 @@ class BinPacker:
             Pre-filled tray to pack into. If provided, must match tray_size.
             Non-zero values are treated as obstacles. Object IDs will start
             after the maximum value in initial_tray.
+        orientations_per_item : sequence of int, optional
+            Per-item override for ``num_orientations`` (1, 4, 6 or 24), indexed
+            like ``items``. Use 4 to keep an item upright (Z-axis rotations
+            only) — a cake or a potted plant must not be turned on its side even
+            when a flipped orientation would pack better. ``None`` uses
+            ``self.num_orientations`` for every item, which is the previous
+            behaviour.
 
         Returns
         -------
@@ -507,7 +515,11 @@ class BinPacker:
             best_rotated_item = item
             found_any = False
 
-            orientations = get_orientations(item, self.num_orientations)
+            num_orient = self.num_orientations
+            if orientations_per_item is not None:
+                # 정렬로 순서가 바뀌었을 수 있으므로 원래 인덱스로 찾는다.
+                num_orient = int(orientations_per_item[orig_idx])
+            orientations = get_orientations(item, num_orient)
 
             # Pre-compute distance field ONCE per item (not per orientation)
             # Use only placed items (tray > id_offset) — exclude walls (= id_offset)
@@ -516,7 +528,7 @@ class BinPacker:
             # (the C++ single-orientation path would use the wall-included
             # tray instead — the score therefore differs slightly there).
             support_enabled = self.support_threshold > 0.0
-            if self.num_orientations > 1 or self.interlocking_free or support_enabled:
+            if num_orient > 1 or self.interlocking_free or support_enabled:
                 item_only_tray = (tray > id_offset).astype(np.int32)
                 tray_distance = self._compute_distance_field(item_only_tray)
 
@@ -554,7 +566,7 @@ class BinPacker:
                         position, found, score = self._search_placement_supported(
                             rotated_item, tray, tray_distance
                         )
-                    elif self.num_orientations > 1:
+                    elif num_orient > 1:
                         position, found, score = fft_search_placement_with_cache(
                             rotated_item, tray, tray_distance, generation
                         )
@@ -573,7 +585,7 @@ class BinPacker:
                 refined_pos = None
                 if self.continuous_refinement:
                     # Need distance field (compute if not already available)
-                    if not (self.num_orientations > 1 or self.interlocking_free):
+                    if not (num_orient > 1 or self.interlocking_free):
                         item_only_tray = (tray > id_offset).astype(np.int32)
                         tray_distance = self._compute_distance_field(item_only_tray)
                     refined_pos = self._refine_placement(
