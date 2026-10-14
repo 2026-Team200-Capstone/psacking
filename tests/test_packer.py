@@ -247,3 +247,46 @@ class TestIntegration:
 
         if result.num_placed == 1:
             assert result.total_volume == 125
+
+
+class TestFloorSupport:
+    """floor_support_items: wheeled items stand on the floor and keep the room under them."""
+
+    @staticmethod
+    def _cart():
+        # 8x6 platform on top, four 1x1 wheels three voxels tall at the corners.
+        cart = np.zeros((8, 6, 4), dtype=np.int32)
+        cart[:, :, 3] = 1
+        for x in (0, 7):
+            for y in (0, 5):
+                cart[x, y, :3] = 1
+        return cart
+
+    def test_ratio_rule_rejects_a_wheeled_item(self):
+        from spectral_packer import BinPacker
+
+        packer = BinPacker(tray_size=(10, 8, 8), num_orientations=4, support_threshold=0.4)
+        assert packer.pack_voxels([self._cart()]).num_placed == 0
+
+    def test_floor_rule_stands_it_on_its_wheels_with_room_underneath(self):
+        from spectral_packer import BinPacker
+
+        flat = np.ones((4, 3, 2), dtype=np.int32)
+        # The tray is exactly the cart, so the flat box can only go under it.
+        packer = BinPacker(tray_size=(8, 6, 4), num_orientations=4, support_threshold=0.4)
+        result = packer.pack_voxels(
+            [self._cart(), flat], sort_by_volume=False, floor_support_items=[True, False]
+        )
+        assert result.num_placed == 2
+        cart_place = next(p for p in result.placements if p.item_index == 0)
+        assert tuple(cart_place.position) == (0, 0, 0)
+
+    def test_floor_rule_does_not_stand_on_items_from_the_same_call(self):
+        from spectral_packer import BinPacker
+
+        slab = np.ones((8, 6, 2), dtype=np.int32)  # covers the whole floor
+        packer = BinPacker(tray_size=(8, 6, 8), num_orientations=4, support_threshold=0.4)
+        result = packer.pack_voxels(
+            [slab, self._cart()], sort_by_volume=False, floor_support_items=[False, True]
+        )
+        assert [p.success for p in sorted(result.placements, key=lambda p: p.item_index)] == [True, False]

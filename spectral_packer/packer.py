@@ -424,6 +424,7 @@ class BinPacker:
         sort_by_volume: bool = True,
         initial_tray: Optional[np.ndarray] = None,
         orientations_per_item: Optional[Sequence[int]] = None,
+        floor_support_items: Optional[Sequence[bool]] = None,
     ) -> PackingResult:
         """
         Pack pre-voxelized items.
@@ -446,6 +447,16 @@ class BinPacker:
             when a flipped orientation would pack better. ``None`` uses
             ``self.num_orientations`` for every item, which is the previous
             behaviour.
+        floor_support_items : sequence of bool, optional
+            Per-item support rule, indexed like ``items``; only used when
+            ``support_threshold > 0``. ``True`` replaces the contact-ratio test
+            with "touches what was in the tray before this call (the floor and
+            walls of ``initial_tray``) and the centre of mass lies over those
+            contacts". Items that stand on wheels or legs touch with a tiny
+            fraction of their downward faces and would otherwise never pass the
+            ratio, which also hides the room underneath them. Such items may
+            not rest on items placed in the same call. ``None`` keeps the
+            ratio test for every item.
 
         Returns
         -------
@@ -571,7 +582,14 @@ class BinPacker:
 
                     if support_enabled:
                         position, found, score = self._search_placement_supported(
-                            rotated_item, tray, tray_distance
+                            rotated_item,
+                            tray,
+                            tray_distance,
+                            floor_only=bool(
+                                floor_support_items is not None
+                                and floor_support_items[orig_idx]
+                            ),
+                            id_offset=id_offset,
                         )
                     elif num_orient > 1:
                         position, found, score = fft_search_placement_with_cache(
@@ -705,6 +723,8 @@ class BinPacker:
         item: np.ndarray,
         tray: np.ndarray,
         tray_phi: np.ndarray,
+        floor_only: bool = False,
+        id_offset: int = 0,
     ) -> Tuple[Optional[Tuple[int, int, int]], bool, float]:
         """Find the best placement that satisfies the support constraint.
 
@@ -738,6 +758,9 @@ class BinPacker:
         feasible = collision == 0
 
         occ = (tray != 0).astype(np.int32)
+        if floor_only:
+            # Only what was there before this call (floor, walls) supports it.
+            occ = ((tray != 0) & (tray <= id_offset)).astype(np.int32)
         ratio, contact_count = support_ratio_grid(occ, item, ground_at_z0=True)
         if contact_count == 0:
             return None, False, 0.0
@@ -756,7 +779,10 @@ class BinPacker:
         score = proximity / norm + self.height_penalty * qz[np.newaxis, np.newaxis, :]
 
         # Numerical guard on the ratio comparison (FFT round-off).
-        valid = feasible & (ratio >= self.support_threshold - 1e-9)
+        if floor_only:
+            valid = feasible & (ratio > 1e-9)  # any contact; CoM is checked below
+        else:
+            valid = feasible & (ratio >= self.support_threshold - 1e-9)
         valid_idx = np.flatnonzero(valid)
         if valid_idx.size == 0:
             return None, False, 0.0
