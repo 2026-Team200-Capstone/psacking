@@ -316,6 +316,23 @@ class TestFFTSearchWithCache:
         if found1 and found2:
             assert pos1[0] >= 0 and pos2[0] >= 0
 
+    def test_cache_not_reused_across_pack_calls(self):
+        """A second pack_voxels on a different tray must not see the first call's cached tray."""
+        from spectral_packer import BinPacker
+
+        item = np.ones((4, 2, 2), dtype=np.int32)
+        packer = BinPacker(tray_size=(12, 12, 6), num_orientations=6)
+
+        # One item → the first call only searches at its first generation.
+        first = packer.pack_voxels([item])
+        assert first.num_placed == 1
+
+        # Previously raised "(place_in_tray): ... intersects with contents of tray".
+        second = BinPacker(tray_size=(12, 12, 6), num_orientations=6).pack_voxels(
+            [item], initial_tray=np.asarray(first.tray)
+        )
+        assert second.num_placed == 1
+
 
 class TestFFTSearchBatch:
     """Tests for fft_search_batch (batch orientation search).

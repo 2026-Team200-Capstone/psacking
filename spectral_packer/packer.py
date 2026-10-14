@@ -15,6 +15,7 @@ Examples
 
 from __future__ import annotations
 
+import itertools
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,12 @@ import numpy as np
 from .mesh_io import load_mesh
 from .voxelizer import Voxelizer, VoxelizationInfo, LogEntry
 from .rotations import get_orientations, make_contiguous
+
+# The C++ GPU tray cache is process-global and keyed only by generation, so
+# generations must never repeat across pack_voxels calls — a fresh call that
+# restarted at 0 could reuse the previous call's tray and place into occupied cells.
+# Start far above the small values tests and scripts pass by hand.
+_generations = itertools.count(1 << 32)
 
 
 @dataclass
@@ -498,7 +505,7 @@ class BinPacker:
         else:
             tray = np.zeros(self.tray_size, dtype=np.int32)
             id_offset = 0
-        generation = 0
+        generation = next(_generations)
 
         placements = []
         num_placed = 0
@@ -594,7 +601,7 @@ class BinPacker:
 
                 item_id = id_offset + num_placed + 1
                 tray = place_in_tray(best_rotated_item, tray, best_position, item_id)
-                generation += 1
+                generation = next(_generations)
                 num_placed += 1
                 placements.append(PlacementInfo(
                     item_index=orig_idx,
