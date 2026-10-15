@@ -290,3 +290,39 @@ class TestFloorSupport:
             [slab, self._cart()], sort_by_volume=False, floor_support_items=[False, True]
         )
         assert [p.success for p in sorted(result.placements, key=lambda p: p.item_index)] == [True, False]
+
+
+class TestAttractMask:
+    """attract_mask: a trunk fills from its back wall instead of the array-origin corner."""
+
+    @staticmethod
+    def _walled_tray():
+        tray = np.zeros((20, 20, 10), dtype=np.int32)
+        tray[[0, -1], :, :] = 1
+        tray[:, [0, -1], :] = 1
+        tray[:, :, 0] = 1
+        return tray
+
+    def test_without_a_mask_the_first_item_drifts_to_the_origin_corner(self):
+        from spectral_packer import BinPacker
+
+        tray = self._walled_tray()
+        result = BinPacker(tray_size=tray.shape, support_threshold=0.4).pack_voxels(
+            [np.ones((4, 4, 2), dtype=np.int32)], initial_tray=tray
+        )
+        assert result.placements[0].position[1] <= 2
+
+    def test_items_gather_against_the_attracting_back_wall(self):
+        from spectral_packer import BinPacker
+
+        tray = self._walled_tray()
+        back_wall = np.zeros(tray.shape, dtype=bool)
+        back_wall[:, -1, :] = True  # +y is the inside of the trunk
+        box = np.ones((4, 4, 2), dtype=np.int32)
+        result = BinPacker(tray_size=tray.shape, support_threshold=0.4).pack_voxels(
+            [box, box, box], initial_tray=tray, sort_by_volume=False, attract_mask=back_wall
+        )
+        assert result.num_placed == 3
+        # The first box (id 2, walls are 1) touches the back wall: free cells end at y = 18.
+        first_cells = np.argwhere(np.asarray(result.tray) == 2)
+        assert first_cells[:, 1].max() == 18

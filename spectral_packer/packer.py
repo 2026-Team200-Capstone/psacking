@@ -425,6 +425,7 @@ class BinPacker:
         initial_tray: Optional[np.ndarray] = None,
         orientations_per_item: Optional[Sequence[int]] = None,
         floor_support_items: Optional[Sequence[bool]] = None,
+        attract_mask: Optional[np.ndarray] = None,
     ) -> PackingResult:
         """
         Pack pre-voxelized items.
@@ -457,6 +458,13 @@ class BinPacker:
             ratio, which also hides the room underneath them. Such items may
             not rest on items placed in the same call. ``None`` keeps the
             ratio test for every item.
+        attract_mask : np.ndarray of bool, optional
+            Cells (tray-shaped) that pull items toward them like already placed
+            items do. Walls are left out of the proximity field so items do not
+            hug every wall; with nothing placed yet the field is degenerate and
+            the first item drifts to the array-origin corner. Pass the back wall
+            of a car trunk here to fill it from the inside out. ``None`` keeps
+            the previous behaviour.
 
         Returns
         -------
@@ -516,6 +524,13 @@ class BinPacker:
         else:
             tray = np.zeros(self.tray_size, dtype=np.int32)
             id_offset = 0
+        if attract_mask is not None:
+            attract_mask = np.asarray(attract_mask, dtype=bool)
+            if attract_mask.shape != self.tray_size:
+                raise ValueError(
+                    f"attract_mask shape {attract_mask.shape} does not match "
+                    f"tray_size {self.tray_size}"
+                )
         generation = next(_generations)
 
         placements = []
@@ -547,7 +562,7 @@ class BinPacker:
             # tray instead — the score therefore differs slightly there).
             support_enabled = self.support_threshold > 0.0
             if num_orient > 1 or self.interlocking_free or support_enabled:
-                item_only_tray = (tray > id_offset).astype(np.int32)
+                item_only_tray = self._proximity_targets(tray, id_offset, attract_mask)
                 tray_distance = self._compute_distance_field(item_only_tray)
 
             if self.interlocking_free:
@@ -611,7 +626,7 @@ class BinPacker:
                 if self.continuous_refinement:
                     # Need distance field (compute if not already available)
                     if not (num_orient > 1 or self.interlocking_free):
-                        item_only_tray = (tray > id_offset).astype(np.int32)
+                        item_only_tray = self._proximity_targets(tray, id_offset, attract_mask)
                         tray_distance = self._compute_distance_field(item_only_tray)
                     refined_pos = self._refine_placement(
                         best_rotated_item, tray_distance, best_position
@@ -840,6 +855,16 @@ class BinPacker:
         )
         refined = tuple((q + result.x).tolist())
         return refined
+
+    @staticmethod
+    def _proximity_targets(
+        tray: np.ndarray, id_offset: int, attract_mask: Optional[np.ndarray]
+    ) -> np.ndarray:
+        """Cells items are drawn to: items placed in this call, plus attract_mask."""
+        targets = tray > id_offset
+        if attract_mask is not None:
+            targets = targets | attract_mask
+        return targets.astype(np.int32)
 
     def _compute_distance_field(self, tray: np.ndarray) -> np.ndarray:
         """Compute Euclidean distance field using scipy.
